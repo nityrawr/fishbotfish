@@ -1124,12 +1124,18 @@ const BREAK_CHANCE = 0.05; // 5% chance to break the rod on each cast
 const rodBrokenUntil = new Map(); // userId -> timestamp when repair finishes
 const currentlyFishing = new Set(); // userId currently fishing
 
-const RARITY_EMOJI = {
-  Common: '⚪',
-  Rare: '🔵',
-  Epic: '🟣',
-  Legendary: '🟡',
+// ANSI color codes for Discord code blocks (only renders on desktop/web client)
+const RARITY_ANSI = {
+  Common: '2;37',   // gray/white
+  Rare: '2;34',      // blue
+  Epic: '2;35',      // magenta/purple
+  Legendary: '1;33', // bold yellow/gold
 };
+
+function colorizeFishName(name, rarity) {
+  const code = RARITY_ANSI[rarity];
+  return `\`\`\`ansi\n\u001b[${code}m${name}\u001b[0m\n\`\`\``;
+}
 
 // Cumulative probabilities: 60% Common, 25% Rare, 12% Epic, 3% Legendary
 function rollRarity() {
@@ -1147,23 +1153,26 @@ client.on('messageCreate', async (message) => {
     const userId = message.author.id;
     const now = Date.now();
 
+    // Server display name, falls back to username if unavailable (e.g. DMs)
+    const displayName = message.member?.displayName ?? message.author.username;
+
     // Rod broken?
     const repairEnd = rodBrokenUntil.get(userId);
     if (repairEnd && now < repairEnd) {
       const minutes = Math.ceil((repairEnd - now) / 60000);
-      message.reply(`🎣💔 Your fishing rod is broken! ${minutes} more minute(s) until it's repaired.`);
+      message.reply(`🎣💔 ${displayName}'s fishing rod is broken! ${minutes} more minute(s) until it's repaired.`);
       return;
     }
 
     // Already fishing?
     if (currentlyFishing.has(userId)) {
-      message.reply(`🎣 You're already fishing, be patient!`);
+      message.reply(`🎣 ${displayName} is already fishing, be patient!`);
       return;
     }
 
     currentlyFishing.add(userId);
-    const waitMs = Math.floor(Math.random() * (25000 - 5000 + 1)) + 5000;
-    const waitingMessage = await message.reply('🎣 You cast your line into the water...');
+    const waitMs = Math.floor(Math.random() * (120000 - 60000 + 1)) + 60000;
+    const waitingMessage = await message.reply(`🎣 ${displayName} cast his line into the water...`);
 
     setTimeout(async () => {
       currentlyFishing.delete(userId);
@@ -1172,7 +1181,7 @@ client.on('messageCreate', async (message) => {
       if (Math.random() < BREAK_CHANCE) {
         rodBrokenUntil.set(userId, Date.now() + REPAIR_MS);
         try {
-          await waitingMessage.edit('💥 Snap! Your fishing rod broke! It will take 1 hour to repair.');
+          await waitingMessage.edit(`💥 Snap! ${displayName}'s fishing rod broke! It will take 1 hour to repair.`);
         } catch (e) {
           console.error('Error editing message:', e);
         }
@@ -1185,9 +1194,9 @@ client.on('messageCreate', async (message) => {
 
       let text;
       if (rarity === 'Legendary') {
-        text = `🐟✨ **${fishName}** — ${emoji} **${rarity}** catch! Incredible! ✨`;
+        text = `🐟✨ ${displayName} caught a **${fishName}** — ${emoji} **${rarity}** catch! Incredible! ✨`;
       } else {
-        text = `🐟 **${fishName}** — ${emoji} ${rarity}`;
+        text = `🐟 ${displayName} caught a **${fishName}** — ${emoji} ${rarity}`;
       }
 
       try {
