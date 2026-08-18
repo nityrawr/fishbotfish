@@ -8,6 +8,7 @@
 // -------------------------------------------------
 
 const { Client, GatewayIntentBits } = require('discord.js');
+const { Pool } = require('pg');
 
 const client = new Client({
   intents: [
@@ -16,6 +17,45 @@ const client = new Client({
     GatewayIntentBits.MessageContent, // must also be enabled in the Developer Portal
   ],
 });
+
+// PostgreSQL connection (Railway provides DATABASE_URL automatically once a
+// Postgres database is added to the project)
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+});
+
+async function initDatabase() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS catches (
+      user_id TEXT NOT NULL,
+      fish_name TEXT NOT NULL,
+      caught_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (user_id, fish_name)
+    )
+  `);
+}
+
+// Records a catch. Returns true if this is the first time this user caught
+// this specific fish (a "new" entry in their collection).
+async function recordCatch(userId, fishName) {
+  const result = await pool.query(
+    `INSERT INTO catches (user_id, fish_name)
+     VALUES ($1, $2)
+     ON CONFLICT (user_id, fish_name) DO NOTHING
+     RETURNING fish_name`,
+    [userId, fishName]
+  );
+  return result.rowCount > 0;
+}
+
+async function getCollectionCount(userId) {
+  const result = await pool.query(
+    `SELECT COUNT(*)::int AS count FROM catches WHERE user_id = $1`,
+    [userId]
+  );
+  return result.rows[0].count;
+}
 
 // Fish table: each fish has its own drop weight (in %) among successful catches.
 // Weights are normalized so they sum to ~100.
@@ -138,9 +178,15 @@ function pickFish() {
   return CUMULATIVE_TABLE[CUMULATIVE_TABLE.length - 1]; // fallback, floating point safety
 }
 
-client.once('ready', () => {
+client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}!`);
   console.log(`${FISH_TABLE.length} fish loaded.`);
+  try {
+    await initDatabase();
+    console.log('Database ready.');
+  } catch (e) {
+    console.error('Database init error:', e);
+  }
 });
 
 const REPAIR_MS = 60 * 60 * 1000; // 1 hour to repair a broken rod
@@ -203,11 +249,19 @@ client.on('messageCreate', async (message) => {
       const fish = pickFish();
       const emoji = RARITY_EMOJI[fish.rarity];
 
+      let isNew = false;
+      try {
+        isNew = await recordCatch(userId, fish.name);
+      } catch (e) {
+        console.error('Error recording catch:', e);
+      }
+      const newTag = isNew ? ' 🆕 **NEW!**' : '';
+
       let text;
       if (fish.rarity === 'Legendary') {
-        text = `🐟✨ ${displayName} caught a **${fish.name}** — ${emoji} **${fish.rarity}** catch! Incredible! ✨`;
+        text = `🐟✨ ${displayName} caught a **${fish.name}** — ${emoji} **${fish.rarity}** catch! Incredible! ✨${newTag}`;
       } else {
-        text = `🐟 ${displayName} caught a **${fish.name}** — ${emoji} ${fish.rarity}`;
+        text = `🐟 ${displayName} caught a **${fish.name}** — ${emoji} ${fish.rarity}${newTag}`;
       }
 
       try {
@@ -216,6 +270,20 @@ client.on('messageCreate', async (message) => {
         console.error('Error editing message:', e);
       }
     }, waitMs);
+  }
+
+  if (message.content.trim().toLowerCase() === '!fishdex') {
+    const userId = message.author.id;
+    const displayName = message.member?.displayName ?? message.author.username;
+
+    try {
+      const count = await getCollectionCount(userId);
+      const total = FISH_TABLE.length;
+      message.reply(`📖 ${displayName}'s collection: **${count}/${total}** different fish caught.`);
+    } catch (e) {
+      console.error('Error fetching collection:', e);
+      message.reply(`⚠️ Couldn't fetch your collection right now, try again later.`);
+    }
   }
 });
 
