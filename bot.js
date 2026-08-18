@@ -1119,12 +1119,57 @@ client.once('ready', () => {
   console.log(`${poissons.length} poissons chargés.`);
 });
 
+const COOLDOWN_MS = 60 * 60 * 1000; // 1 heure
+const dernierUsage = new Map(); // userId -> timestamp du dernier !fish
+
+const RARETE_EMOJI = {
+  Common: '⚪',
+  Rare: '🔵',
+  Epic: '🟣',
+  Legendary: '🟡',
+};
+
+const RARETE_FR = {
+  Common: 'Commun',
+  Rare: 'Rare',
+  Epic: 'Épique',
+  Legendary: 'Légendaire',
+};
+
+// Probabilités cumulées : 60% Common, 25% Rare, 12% Epic, 3% Legendary
+function tirerRarete() {
+  const r = Math.random();
+  if (r < 0.60) return 'Common';
+  if (r < 0.85) return 'Rare';
+  if (r < 0.97) return 'Epic';
+  return 'Legendary';
+}
+
 client.on('messageCreate', (message) => {
   if (message.author.bot) return;
 
   if (message.content.trim().toLowerCase() === '!fish') {
-    const poissonAleatoire = poissons[Math.floor(Math.random() * poissons.length)];
-    message.reply(`🐟 ${poissonAleatoire}`);
+    const maintenant = Date.now();
+    const dernier = dernierUsage.get(message.author.id);
+
+    if (dernier && maintenant - dernier < COOLDOWN_MS) {
+      const restantMs = COOLDOWN_MS - (maintenant - dernier);
+      const minutes = Math.ceil(restantMs / 60000);
+      message.reply(`⏳ Tu dois attendre encore ${minutes} minute(s) avant de pouvoir repêcher un poisson.`);
+      return;
+    }
+
+    dernierUsage.set(message.author.id, maintenant);
+    const nomPoisson = poissons[Math.floor(Math.random() * poissons.length)];
+    const rarete = tirerRarete();
+    const emoji = RARETE_EMOJI[rarete];
+    const rareteFr = RARETE_FR[rarete];
+
+    if (rarete === 'Legendary') {
+      message.reply(`🐟✨ **${nomPoisson}** — ${emoji} **${rareteFr}** ! Incroyable prise ! ✨`);
+    } else {
+      message.reply(`🐟 **${nomPoisson}** — ${emoji} ${rareteFr}`);
+    }
   }
 });
 
