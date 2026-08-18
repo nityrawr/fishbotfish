@@ -1,9 +1,9 @@
-// Bot Discord - commande !fish
+// Discord Bot - !fish command
 // -------------------------------------------------
-// Installation :
+// Setup:
 //   1. npm init -y
 //   2. npm install discord.js
-//   3. Remplace TON_TOKEN_ICI par le token de ton bot (portail développeur Discord)
+//   3. Replace YOUR_TOKEN_HERE with your bot token (Discord Developer Portal)
 //   4. node bot.js
 // -------------------------------------------------
 
@@ -13,11 +13,11 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent, // à activer aussi dans le portail développeur
+    GatewayIntentBits.MessageContent, // must also be enabled in the Developer Portal
   ],
 });
 
-// Liste de poissons
+// Fish list
 const poissons = [
   'African glass catfish',
   'African lungfish',
@@ -1115,29 +1115,24 @@ const poissons = [
 ];
 
 client.once('ready', () => {
-  console.log(`Connecté en tant que ${client.user.tag} !`);
-  console.log(`${poissons.length} poissons chargés.`);
+  console.log(`Logged in as ${client.user.tag}!`);
+  console.log(`${poissons.length} fish loaded.`);
 });
 
-const COOLDOWN_MS = 60 * 60 * 1000; // 1 heure
-const dernierUsage = new Map(); // userId -> timestamp du dernier !fish
+const REPAIR_MS = 60 * 60 * 1000; // 1 hour to repair a broken rod
+const BREAK_CHANCE = 0.05; // 5% chance to break the rod on each cast
+const rodBrokenUntil = new Map(); // userId -> timestamp when repair finishes
+const currentlyFishing = new Set(); // userId currently fishing
 
-const RARETE_EMOJI = {
+const RARITY_EMOJI = {
   Common: '⚪',
   Rare: '🔵',
   Epic: '🟣',
   Legendary: '🟡',
 };
 
-const RARETE_FR = {
-  Common: 'Commun',
-  Rare: 'Rare',
-  Epic: 'Épique',
-  Legendary: 'Légendaire',
-};
-
-// Probabilités cumulées : 60% Common, 25% Rare, 12% Epic, 3% Legendary
-function tirerRarete() {
+// Cumulative probabilities: 60% Common, 25% Rare, 12% Epic, 3% Legendary
+function rollRarity() {
   const r = Math.random();
   if (r < 0.60) return 'Common';
   if (r < 0.85) return 'Rare';
@@ -1145,31 +1140,62 @@ function tirerRarete() {
   return 'Legendary';
 }
 
-client.on('messageCreate', (message) => {
+client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
 
   if (message.content.trim().toLowerCase() === '!fish') {
-    const maintenant = Date.now();
-    const dernier = dernierUsage.get(message.author.id);
+    const userId = message.author.id;
+    const now = Date.now();
 
-    if (dernier && maintenant - dernier < COOLDOWN_MS) {
-      const restantMs = COOLDOWN_MS - (maintenant - dernier);
-      const minutes = Math.ceil(restantMs / 60000);
-      message.reply(`⏳ Tu dois attendre encore ${minutes} minute(s) avant de pouvoir repêcher un poisson.`);
+    // Rod broken?
+    const repairEnd = rodBrokenUntil.get(userId);
+    if (repairEnd && now < repairEnd) {
+      const minutes = Math.ceil((repairEnd - now) / 60000);
+      message.reply(`🎣💔 Your fishing rod is broken! ${minutes} more minute(s) until it's repaired.`);
       return;
     }
 
-    dernierUsage.set(message.author.id, maintenant);
-    const nomPoisson = poissons[Math.floor(Math.random() * poissons.length)];
-    const rarete = tirerRarete();
-    const emoji = RARETE_EMOJI[rarete];
-    const rareteFr = RARETE_FR[rarete];
-
-    if (rarete === 'Legendary') {
-      message.reply(`🐟✨ **${nomPoisson}** — ${emoji} **${rareteFr}** ! Incroyable prise ! ✨`);
-    } else {
-      message.reply(`🐟 **${nomPoisson}** — ${emoji} ${rareteFr}`);
+    // Already fishing?
+    if (currentlyFishing.has(userId)) {
+      message.reply(`🎣 You're already fishing, be patient!`);
+      return;
     }
+
+    currentlyFishing.add(userId);
+    const waitMs = Math.floor(Math.random() * (25000 - 5000 + 1)) + 5000;
+    const waitingMessage = await message.reply('🎣 You cast your line into the water...');
+
+    setTimeout(async () => {
+      currentlyFishing.delete(userId);
+
+      // Does the rod break?
+      if (Math.random() < BREAK_CHANCE) {
+        rodBrokenUntil.set(userId, Date.now() + REPAIR_MS);
+        try {
+          await waitingMessage.edit('💥 Snap! Your fishing rod broke! It will take 1 hour to repair.');
+        } catch (e) {
+          console.error('Error editing message:', e);
+        }
+        return;
+      }
+
+      const fishName = poissons[Math.floor(Math.random() * poissons.length)];
+      const rarity = rollRarity();
+      const emoji = RARITY_EMOJI[rarity];
+
+      let text;
+      if (rarity === 'Legendary') {
+        text = `🐟✨ **${fishName}** — ${emoji} **${rarity}** catch! Incredible! ✨`;
+      } else {
+        text = `🐟 **${fishName}** — ${emoji} ${rarity}`;
+      }
+
+      try {
+        await waitingMessage.edit(text);
+      } catch (e) {
+        console.error('Error editing message:', e);
+      }
+    }, waitMs);
   }
 });
 
