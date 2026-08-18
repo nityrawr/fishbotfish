@@ -1124,19 +1124,6 @@ const BREAK_CHANCE = 0.05; // 5% chance to break the rod on each cast
 const rodBrokenUntil = new Map(); // userId -> timestamp when repair finishes
 const currentlyFishing = new Set(); // userId currently fishing
 
-// ANSI color codes for Discord code blocks (only renders on desktop/web client)
-const RARITY_ANSI = {
-  Common: '2;37',   // gray/white
-  Rare: '2;34',      // blue
-  Epic: '2;35',      // magenta/purple
-  Legendary: '1;33', // bold yellow/gold
-};
-
-function colorizeFishName(name, rarity) {
-  const code = RARITY_ANSI[rarity];
-  return `\`\`\`ansi\n\u001b[${code}m${name}\u001b[0m\n\`\`\``;
-}
-
 // Cumulative probabilities: 60% Common, 25% Rare, 12% Epic, 3% Legendary
 function rollRarity() {
   const r = Math.random();
