@@ -418,7 +418,8 @@ client.on('messageCreate', async (message) => {
       const total = FISH_TABLE.length;
       const balance = await getCreditBalance(userId);
       const totalCatches = await getTotalCatches(userId);
-      message.reply(`📖 ${displayName}'s collection: **${count}/${total}** different fish caught.\n💰 Bits Coins: **${balance}**\n🎣 Total fish caught: **${totalCatches}**`);
+      const percentage = ((count / total) * 100).toFixed(1);
+      message.reply(`📖 ${displayName}'s collection: **${count}/${total}** (${percentage}%) different fish caught.\n💰 Bits Coins: **${balance}**\n🎣 Total fish caught: **${totalCatches}**`);
     } catch (e) {
       console.error('Error fetching collection:', e);
       message.reply(`⚠️ Couldn't fetch your collection right now, try again later.`);
