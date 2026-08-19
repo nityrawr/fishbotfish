@@ -173,99 +173,99 @@ async function getTotalCatches(userId) {
 // Fish table: each fish has its own drop weight (in %) among successful catches.
 // Weights are normalized so they sum to ~100.
 const FISH_TABLE = [
-  { name: 'Trout', rarity: 'Common', weight: 1.3951 },
-  { name: 'Mullet', rarity: 'Common', weight: 1.3951 },
-  { name: 'Garfish', rarity: 'Common', weight: 1.3951 },
-  { name: 'Blue tuskfish', rarity: 'Common', weight: 1.3951 },
-  { name: 'Blackspot tuskfish', rarity: 'Common', weight: 1.3951 },
-  { name: 'Coral trout', rarity: 'Common', weight: 1.3951 },
-  { name: 'Cod', rarity: 'Common', weight: 1.3951 },
-  { name: 'Mackerel', rarity: 'Common', weight: 1.3951 },
-  { name: 'Carp', rarity: 'Common', weight: 1.3951 },
-  { name: 'Perch', rarity: 'Common', weight: 1.3951 },
-  { name: 'Sardine', rarity: 'Common', weight: 1.3951 },
-  { name: 'Stripey snapper', rarity: 'Common', weight: 1.3951 },
-  { name: 'Red emperor', rarity: 'Common', weight: 1.3951 },
-  { name: 'Grass emperor', rarity: 'Common', weight: 1.3951 },
-  { name: 'Goldspotted rockcod', rarity: 'Common', weight: 1.3951 },
-  { name: 'Longfin rockcod', rarity: 'Common', weight: 1.3951 },
-  { name: 'Sand bass', rarity: 'Common', weight: 1.3951 },
+  { name: 'Trout', rarity: 'Common', weight: 1.3951, baseWeightGrams: 1800 },
+  { name: 'Mullet', rarity: 'Common', weight: 1.3951, baseWeightGrams: 1000 },
+  { name: 'Garfish', rarity: 'Common', weight: 1.3951, baseWeightGrams: 1200 },
+  { name: 'Blue tuskfish', rarity: 'Common', weight: 1.3951, baseWeightGrams: 5000 },
+  { name: 'Blackspot tuskfish', rarity: 'Common', weight: 1.3951, baseWeightGrams: 10000 },
+  { name: 'Coral trout', rarity: 'Common', weight: 1.3951, baseWeightGrams: 4000 },
+  { name: 'Cod', rarity: 'Common', weight: 1.3951, baseWeightGrams: 5000 },
+  { name: 'Mackerel', rarity: 'Common', weight: 1.3951, baseWeightGrams: 350 },
+  { name: 'Carp', rarity: 'Common', weight: 1.3951, baseWeightGrams: 6000 },
+  { name: 'Perch', rarity: 'Common', weight: 1.3951, baseWeightGrams: 300 },
+  { name: 'Sardine', rarity: 'Common', weight: 1.3951, baseWeightGrams: 80 },
+  { name: 'Stripey snapper', rarity: 'Common', weight: 1.3951, baseWeightGrams: 1300 },
+  { name: 'Red emperor', rarity: 'Common', weight: 1.3951, baseWeightGrams: 7000 },
+  { name: 'Grass emperor', rarity: 'Common', weight: 1.3951, baseWeightGrams: 1000 },
+  { name: 'Goldspotted rockcod', rarity: 'Common', weight: 1.3951, baseWeightGrams: 7500 },
+  { name: 'Longfin rockcod', rarity: 'Common', weight: 1.3951, baseWeightGrams: 1000 },
+  { name: 'Sand bass', rarity: 'Common', weight: 1.3951, baseWeightGrams: 900 },
   { name: 'Queensland groper', rarity: 'Common', weight: 1.3951 },
-  { name: 'Mackerel tuna', rarity: 'Common', weight: 1.3951 },
-  { name: 'Longtail tuna', rarity: 'Common', weight: 1.3951 },
-  { name: 'Spanish mackerel', rarity: 'Common', weight: 1.3951 },
-  { name: 'Giant trevally', rarity: 'Common', weight: 1.3951 },
-  { name: 'Golden trevally', rarity: 'Common', weight: 1.3951 },
-  { name: 'Forktail catfish', rarity: 'Common', weight: 1.3951 },
-  { name: 'Beach salmon', rarity: 'Common', weight: 1.3951 },
-  { name: 'Mud crab', rarity: 'Common', weight: 1.3951 },
-  { name: 'Sand crab', rarity: 'Common', weight: 1.3951 },
-  { name: 'Archer fish', rarity: 'Common', weight: 1.3951 },
-  { name: 'King crab', rarity: 'Common', weight: 1.3951 },
-  { name: 'Brown crab', rarity: 'Common', weight: 1.3951 },
-  { name: 'Blue shrimp', rarity: 'Common', weight: 1.3951 },
-  { name: 'Pink shrimp', rarity: 'Common', weight: 1.3951 },
-  { name: 'Spider crab', rarity: 'Common', weight: 1.3951 },
-  { name: 'Pacific giant octopus', rarity: 'Common', weight: 1.3951 },
-  { name: 'Swordfish', rarity: 'Common', weight: 1.3951 },
-  { name: 'Guppy', rarity: 'Common', weight: 1.3951 },
-  { name: 'Goldfish', rarity: 'Common', weight: 1.3951 },
-  { name: 'Eel', rarity: 'Common', weight: 1.3951 },
-  { name: 'Stingray', rarity: 'Common', weight: 1.3951 },
-  { name: 'Tuna', rarity: 'Common', weight: 1.3951 },
-  { name: 'Barracuda', rarity: 'Common', weight: 1.3951 },
-  { name: 'Mahi mahi', rarity: 'Common', weight: 1.3951 },
-  { name: 'Haddock', rarity: 'Common', weight: 1.3951 },
-  { name: 'Sea bass', rarity: 'Common', weight: 1.3951 },
-  { name: 'Sockeye Salmon', rarity: 'Common', weight: 1.3951 },
-  { name: 'Chinook Salmon', rarity: 'Common', weight: 1.3951 },
-  { name: 'Pink Salmon', rarity: 'Common', weight: 1.3951 },
-  { name: 'Halibut', rarity: 'Common', weight: 1.3951 },
-  { name: 'Tilapia', rarity: 'Common', weight: 1.3951 },
-  { name: 'Big fin squid', rarity: 'Common', weight: 1.3951 },
-  { name: 'Clownfish', rarity: 'Common', weight: 1.3951 },
-  { name: 'Catfish', rarity: 'Common', weight: 1.3951 },
-  { name: 'Marlin', rarity: 'Common', weight: 1.3951 },
-  { name: 'Hammerhead shark', rarity: 'Common', weight: 1.116 },
-  { name: 'Bull shark', rarity: 'Common', weight: 1.116 },
-  { name: 'Tiger shark', rarity: 'Common', weight: 1.116 },
-  { name: 'Great white shark', rarity: 'Rare', weight: 0.8371 },
-  { name: 'Electric eel', rarity: 'Rare', weight: 0.8371 },
-  { name: 'Lionfish', rarity: 'Rare', weight: 0.8371 },
-  { name: 'Horseshoe crab', rarity: 'Rare', weight: 0.8371 },
-  { name: 'Flying gurnard', rarity: 'Rare', weight: 0.8371 },
-  { name: 'Flying fish', rarity: 'Rare', weight: 0.8371 },
-  { name: 'Electric ray', rarity: 'Rare', weight: 0.8371 },
-  { name: 'Star gazer fish', rarity: 'Rare', weight: 0.8371 },
-  { name: 'Suckermouth catfish', rarity: 'Rare', weight: 0.8371 },
-  { name: 'Orca', rarity: 'Rare', weight: 0.8371 },
-  { name: 'Alligatorfish', rarity: 'Rare', weight: 0.8371 },
-  { name: 'Manta ray', rarity: 'Rare', weight: 0.8371 },
-  { name: 'Deepsea squid', rarity: 'Rare', weight: 0.8371 },
-  { name: 'Blue ringed octopus', rarity: 'Rare', weight: 0.7673 },
-  { name: 'Coconut octopus', rarity: 'Rare', weight: 0.7673 },
-  { name: 'Giant squid', rarity: 'Rare', weight: 0.6138 },
-  { name: 'Dolphin', rarity: 'Rare', weight: 0.8371 },
-  { name: 'Sunfish', rarity: 'Rare', weight: 0.8371 },
-  { name: 'Blue whale', rarity: 'Rare', weight: 0.8371 },
-  { name: 'Greenland shark', rarity: 'Epic', weight: 0.4185 },
-  { name: 'Saw shark', rarity: 'Epic', weight: 0.4185 },
-  { name: 'Tequila splitfin', rarity: 'Epic', weight: 0.4185 },
-  { name: 'Ornate sleeper ray', rarity: 'Epic', weight: 0.4185 },
-  { name: 'Oarfish', rarity: 'Epic', weight: 0.4185 },
-  { name: 'Giant sea bass', rarity: 'Epic', weight: 0.4185 },
-  { name: 'Beluga sturgeon', rarity: 'Epic', weight: 0.279 },
-  { name: 'Alligator gar', rarity: 'Epic', weight: 0.4185 },
-  { name: 'Arapaïma gigas', rarity: 'Epic', weight: 0.4185 },
-  { name: 'Whale shark', rarity: 'Epic', weight: 0.4185 },
-  { name: 'Chernobyl monster catfish', rarity: 'Legendary', weight: 0.1395 },
-  { name: 'European sturgeon', rarity: 'Legendary', weight: 0.1395 },
-  { name: 'Giant dam catfish', rarity: 'Legendary', weight: 0.0837 },
-  { name: 'White whale', rarity: 'Legendary', weight: 0.0698 },
-  { name: 'Coelacanth', rarity: 'Legendary', weight: 0.0698 },
-  { name: 'Megalodon', rarity: 'Legendary', weight: 0.0279 },
-  { name: 'Loch ness monster', rarity: 'Legendary', weight: 0.0279 },
-  { name: 'Kraken', rarity: 'Legendary', weight: 0.0279 },
+  { name: 'Mackerel tuna', rarity: 'Common', weight: 1.3951, baseWeightGrams: 3500 },
+  { name: 'Longtail tuna', rarity: 'Common', weight: 1.3951, baseWeightGrams: 25000 },
+  { name: 'Spanish mackerel', rarity: 'Common', weight: 1.3951, baseWeightGrams: 4000 },
+  { name: 'Giant trevally', rarity: 'Common', weight: 1.3951, baseWeightGrams: 35000 },
+  { name: 'Golden trevally', rarity: 'Common', weight: 1.3951, baseWeightGrams: 8000 },
+  { name: 'Forktail catfish', rarity: 'Common', weight: 1.3951, baseWeightGrams: 10000 },
+  { name: 'Beach salmon', rarity: 'Common', weight: 1.3951, baseWeightGrams: 3200 },
+  { name: 'Mud crab', rarity: 'Common', weight: 1.3951, baseWeightGrams: 700 },
+  { name: 'Sand crab', rarity: 'Common', weight: 1.3951, baseWeightGrams: 500 },
+  { name: 'Archer fish', rarity: 'Common', weight: 1.3951, baseWeightGrams: 400 },
+  { name: 'King crab', rarity: 'Common', weight: 1.3951, baseWeightGrams: 8000 },
+  { name: 'Brown crab', rarity: 'Common', weight: 1.3951, baseWeightGrams: 2200 },
+  { name: 'Blue shrimp', rarity: 'Common', weight: 1.3951, baseWeightGrams: 30 },
+  { name: 'Pink shrimp', rarity: 'Common', weight: 1.3951, baseWeightGrams: 8 },
+  { name: 'Spider crab', rarity: 'Common', weight: 1.3951, baseWeightGrams: 20000 },
+  { name: 'Pacific giant octopus', rarity: 'Common', weight: 1.3951, baseWeightGrams: 30000 },
+  { name: 'Swordfish', rarity: 'Common', weight: 1.3951, baseWeightGrams: 100000 },
+  { name: 'Guppy', rarity: 'Common', weight: 1.3951, baseWeightGrams: 0.1 },
+  { name: 'Goldfish', rarity: 'Common', weight: 1.3951, baseWeightGrams: 150 },
+  { name: 'Eel', rarity: 'Common', weight: 1.3951, baseWeightGrams: 5000 },
+  { name: 'Stingray', rarity: 'Common', weight: 1.3951, baseWeightGrams: 20000 },
+  { name: 'Tuna', rarity: 'Common', weight: 1.3951, baseWeightGrams: 300000 },
+  { name: 'Barracuda', rarity: 'Common', weight: 1.3951, baseWeightGrams: 6000 },
+  { name: 'Mahi mahi', rarity: 'Common', weight: 1.3951, baseWeightGrams: 10000 },
+  { name: 'Haddock', rarity: 'Common', weight: 1.3951, baseWeightGrams: 2500 },
+  { name: 'Sea bass', rarity: 'Common', weight: 1.3951, baseWeightGrams: 1500 },
+  { name: 'Sockeye Salmon', rarity: 'Common', weight: 1.3951, baseWeightGrams: 5000 },
+  { name: 'Chinook Salmon', rarity: 'Common', weight: 1.3951, baseWeightGrams: 12000 },
+  { name: 'Pink Salmon', rarity: 'Common', weight: 1.3951, baseWeightGrams: 3000 },
+  { name: 'Halibut', rarity: 'Common', weight: 1.3951, baseWeightGrams: 16000 },
+  { name: 'Tilapia', rarity: 'Common', weight: 1.3951, baseWeightGrams: 650 },
+  { name: 'Big fin squid', rarity: 'Common', weight: 1.3951, baseWeightGrams: 1750 },
+  { name: 'Clownfish', rarity: 'Common', weight: 1.3951, baseWeightGrams: 125 },
+  { name: 'Catfish', rarity: 'Common', weight: 1.3951, baseWeightGrams: 28000 },
+  { name: 'Marlin', rarity: 'Common', weight: 1.3951, baseWeightGrams: 500000 },
+  { name: 'Hammerhead shark', rarity: 'Common', weight: 1.116, baseWeightGrams: 300000 },
+  { name: 'Bull shark', rarity: 'Common', weight: 1.116, baseWeightGrams: 150000 },
+  { name: 'Tiger shark', rarity: 'Common', weight: 1.116, baseWeightGrams: 200000 },
+  { name: 'Great white shark', rarity: 'Rare', weight: 0.8371, baseWeightGrams: 1200000 },
+  { name: 'Electric eel', rarity: 'Rare', weight: 0.8371, baseWeightGrams: 18000 },
+  { name: 'Lionfish', rarity: 'Rare', weight: 0.8371, baseWeightGrams: 1000 },
+  { name: 'Horseshoe crab', rarity: 'Rare', weight: 0.8371, baseWeightGrams: 3500 },
+  { name: 'Flying gurnard', rarity: 'Rare', weight: 0.8371, baseWeightGrams: 3000 },
+  { name: 'Flying fish', rarity: 'Rare', weight: 0.8371, baseWeightGrams: 700 },
+  { name: 'Electric ray', rarity: 'Rare', weight: 0.8371, baseWeightGrams: 70000 },
+  { name: 'Star gazer fish', rarity: 'Rare', weight: 0.8371, baseWeightGrams: 700 },
+  { name: 'Suckermouth catfish', rarity: 'Rare', weight: 0.8371, baseWeightGrams: 1400 },
+  { name: 'Orca', rarity: 'Rare', weight: 0.8371, baseWeightGrams: 6000000 },
+  { name: 'Alligatorfish', rarity: 'Rare', weight: 0.8371, baseWeightGrams: 50 },
+  { name: 'Manta ray', rarity: 'Rare', weight: 0.8371, baseWeightGrams: 2500000 },
+  { name: 'Deepsea squid', rarity: 'Rare', weight: 0.8371, baseWeightGrams: 400000 },
+  { name: 'Blue ringed octopus', rarity: 'Rare', weight: 0.7673, baseWeightGrams: 60 },
+  { name: 'Coconut octopus', rarity: 'Rare', weight: 0.7673, baseWeightGrams: 300 },
+  { name: 'Giant squid', rarity: 'Rare', weight: 0.6138, baseWeightGrams: 225000 },
+  { name: 'Dolphin', rarity: 'Rare', weight: 0.8371, baseWeightGrams: 120000 },
+  { name: 'Sunfish', rarity: 'Rare', weight: 0.8371, baseWeightGrams: 500000 },
+  { name: 'Blue whale', rarity: 'Rare', weight: 0.8371, baseWeightGrams: 110000000 },
+  { name: 'Greenland shark', rarity: 'Epic', weight: 0.4185, baseWeightGrams: 700000 },
+  { name: 'Saw shark', rarity: 'Epic', weight: 0.4185, baseWeightGrams: 10000 },
+  { name: 'Tequila splitfin', rarity: 'Epic', weight: 0.4185, baseWeightGrams: 3 },
+  { name: 'Ornate sleeper ray', rarity: 'Epic', weight: 0.4185, baseWeightGrams: 1800 },
+  { name: 'Oarfish', rarity: 'Epic', weight: 0.4185, baseWeightGrams: 250000 },
+  { name: 'Giant sea bass', rarity: 'Epic', weight: 0.4185, baseWeightGrams: 220000 },
+  { name: 'Beluga sturgeon', rarity: 'Epic', weight: 0.279, baseWeightGrams: 250000 },
+  { name: 'Alligator gar', rarity: 'Epic', weight: 0.4185, baseWeightGrams: 80000 },
+  { name: 'Arapaïma gigas', rarity: 'Epic', weight: 0.4185, baseWeightGrams: 160000 },
+  { name: 'Whale shark', rarity: 'Epic', weight: 0.4185, baseWeightGrams: 12000000 },
+  { name: 'Chernobyl monster catfish', rarity: 'Legendary', weight: 0.1395, baseWeightGrams: 150000 },
+  { name: 'European sturgeon', rarity: 'Legendary', weight: 0.1395, baseWeightGrams: 350000 },
+  { name: 'Giant dam catfish', rarity: 'Legendary', weight: 0.0837, baseWeightGrams: 300000 },
+  { name: 'White whale', rarity: 'Legendary', weight: 0.0698, baseWeightGrams: 40000000 },
+  { name: 'Coelacanth', rarity: 'Legendary', weight: 0.0698, baseWeightGrams: 90000 },
+  { name: 'Megalodon', rarity: 'Legendary', weight: 0.0279, baseWeightGrams: 75000000 },
+  { name: 'Loch ness monster', rarity: 'Legendary', weight: 0.0279, baseWeightGrams: 12000000 },
+  { name: 'Kraken', rarity: 'Legendary', weight: 0.0279, baseWeightGrams: 30000000 },
   { name: 'Lost purse', rarity: 'Common Unique', weight: 1.3951, customCredit: 75 },
   { name: 'Bag of money', rarity: 'Rare Unique', weight: 0.8371, customCredit: 150 },
   { name: 'Gold bar', rarity: 'Epic Unique', weight: 0.279, customCredit: 750 },
@@ -297,6 +297,25 @@ function pickFish() {
     if (r <= entry.cumulative) return entry;
   }
   return CUMULATIVE_TABLE[CUMULATIVE_TABLE.length - 1]; // fallback, floating point safety
+}
+
+// Rolls a random variation factor between 0.60 and 1.40 (±40%), applied to
+// both a fish's physical weight and the credits earned for that catch, so a
+// heavier-than-average catch pays out proportionally more.
+function rollVariationFactor() {
+  return 0.60 + Math.random() * 0.80;
+}
+
+// Formats a weight in grams into a human-readable string using the most
+// sensible unit (g, kg, or tons).
+function formatWeight(grams) {
+  if (grams >= 1_000_000) {
+    return `${(grams / 1_000_000).toFixed(2)} tons`;
+  } else if (grams >= 1000) {
+    return `${(grams / 1000).toFixed(2)} kg`;
+  } else {
+    return `${grams.toFixed(1)} g`;
+  }
 }
 
 client.once('ready', async () => {
@@ -387,18 +406,27 @@ client.on('messageCreate', async (message) => {
       }
       const newTag = isNew ? ' 🆕 **NEW!**' : '';
 
-      const creditAmount = fish.customCredit ?? CREDIT_VALUES[fish.rarity];
+      // Roll a single ±40% variation factor, applied to both the catch's
+      // weight and the credits earned (a heavier catch pays out more).
+      const variationFactor = rollVariationFactor();
+      const baseCreditAmount = fish.customCredit ?? CREDIT_VALUES[fish.rarity];
+      const creditAmount = Math.max(1, Math.round(baseCreditAmount * variationFactor));
+
       try {
         await addCredits(userId, creditAmount);
       } catch (e) {
         console.error('Error adding credits:', e);
       }
 
+      const weightText = fish.baseWeightGrams
+        ? ` (${formatWeight(fish.baseWeightGrams * variationFactor)})`
+        : '';
+
       let text;
       if (fish.rarity.startsWith('Legendary')) {
-        text = `🐟✨ ${displayName} caught a **${fish.name}** — ${emoji} **${fish.rarity}** catch! Incredible! ✨${newTag}\n💰 +${creditAmount} Bits Coins`;
+        text = `🐟✨ ${displayName} caught a **${fish.name}**${weightText} — ${emoji} **${fish.rarity}** catch! Incredible! ✨${newTag}\n💰 +${creditAmount} Bits Coins`;
       } else {
-        text = `🐟 ${displayName} caught a **${fish.name}** — ${emoji} ${fish.rarity}${newTag}\n💰 +${creditAmount} Bits Coins`;
+        text = `🐟 ${displayName} caught a **${fish.name}**${weightText} — ${emoji} ${fish.rarity}${newTag}\n💰 +${creditAmount} Bits Coins`;
       }
 
       try {
