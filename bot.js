@@ -266,10 +266,10 @@ const FISH_TABLE = [
   { name: 'Megalodon', rarity: 'Legendary', weight: 0.0279 },
   { name: 'Loch ness monster', rarity: 'Legendary', weight: 0.0279 },
   { name: 'Kraken', rarity: 'Legendary', weight: 0.0279 },
-  { name: 'Lost purse', rarity: 'Common', weight: 1.3951, customCredit: 75 },
-  { name: 'Bag of money', rarity: 'Rare', weight: 0.8371, customCredit: 150 },
-  { name: 'Gold bar', rarity: 'Epic', weight: 0.279, customCredit: 750 },
-  { name: 'Long thought forgotten treasure', rarity: 'Legendary', weight: 0.0279, customCredit: 7500 }
+  { name: 'Lost purse', rarity: 'Common Unique', weight: 1.3951, customCredit: 75 },
+  { name: 'Bag of money', rarity: 'Rare Unique', weight: 0.8371, customCredit: 150 },
+  { name: 'Gold bar', rarity: 'Epic Unique', weight: 0.279, customCredit: 750 },
+  { name: 'Long thought forgotten treasure', rarity: 'Legendary Unique', weight: 0.0279, customCredit: 7500 }
 ];
 
 const RARITY_EMOJI = {
@@ -277,6 +277,10 @@ const RARITY_EMOJI = {
   Rare: '🔵',
   Epic: '🟣',
   Legendary: '🟡',
+  'Common Unique': '⚪💎',
+  'Rare Unique': '🔵💎',
+  'Epic Unique': '🟣💎',
+  'Legendary Unique': '🟡💎',
 };
 
 // Precompute cumulative weights once for fast weighted random picks
@@ -391,7 +395,7 @@ client.on('messageCreate', async (message) => {
       }
 
       let text;
-      if (fish.rarity === 'Legendary') {
+      if (fish.rarity.startsWith('Legendary')) {
         text = `🐟✨ ${displayName} caught a **${fish.name}** — ${emoji} **${fish.rarity}** catch! Incredible! ✨${newTag}\n💰 +${creditAmount} Bits Coins`;
       } else {
         text = `🐟 ${displayName} caught a **${fish.name}** — ${emoji} ${fish.rarity}${newTag}\n💰 +${creditAmount} Bits Coins`;
