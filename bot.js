@@ -115,7 +115,7 @@ async function transferCredits(senderId, receiverId, amount) {
 }
 
 const BASE_REPAIR_COST = 500;
-const REPAIR_COST_INCREASE = 50;
+const REPAIR_COST_INCREASE = 10;
 
 // Returns { balance, repairCost } for a user: current credit balance and
 // the cost of their NEXT repair (increases by 50 after each successful repair).
@@ -330,7 +330,7 @@ client.once('ready', async () => {
 });
 
 const REPAIR_MS = 60 * 60 * 1000; // 1 hour to repair a broken rod passively (if the user does nothing)
-const BREAK_CHANCE = 0.05; // 5% chance to break the rod on each cast
+const BREAK_CHANCE = 0.04; // 4% chance to break the rod on each cast
 const NO_CATCH_CHANCE = 0.20; // 20% chance to catch nothing
 const rodBrokenUntil = new Map(); // userId -> timestamp when passive repair finishes
 const currentlyFishing = new Set(); // userId currently fishing
