@@ -355,7 +355,7 @@ client.on('messageCreate', async (message) => {
       }
 
       try {
-        await message.channel.send(text);
+        await message.reply(text);
       } catch (e) {
         console.error('Error sending message:', e);
       }
