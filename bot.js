@@ -31,22 +31,87 @@ async function initDatabase() {
       user_id TEXT NOT NULL,
       fish_name TEXT NOT NULL,
       caught_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      times_caught INTEGER NOT NULL DEFAULT 1,
       PRIMARY KEY (user_id, fish_name)
+    )
+  `);
+  // In case the table already existed from a previous deploy without this column
+  await pool.query(`ALTER TABLE catches ADD COLUMN IF NOT EXISTS times_caught INTEGER NOT NULL DEFAULT 1`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_credits (
+      user_id TEXT PRIMARY KEY,
+      balance INTEGER NOT NULL DEFAULT 0,
+      repair_count INTEGER NOT NULL DEFAULT 0
     )
   `);
 }
 
-// Records a catch. Returns true if this is the first time this user caught
-// this specific fish (a "new" entry in their collection).
+// Credits awarded per rarity when a fish is caught
+const CREDIT_VALUES = {
+  Common: 25,
+  Rare: 50,
+  Epic: 250,
+  Legendary: 2500,
+};
+
+// Adds credits to a user's balance (creating the row if needed) and returns
+// the new total balance. Pass a negative amount to deduct.
+async function addCredits(userId, amount) {
+  const result = await pool.query(
+    `INSERT INTO user_credits (user_id, balance)
+     VALUES ($1, $2)
+     ON CONFLICT (user_id) DO UPDATE SET balance = user_credits.balance + $2
+     RETURNING balance`,
+    [userId, amount]
+  );
+  return result.rows[0].balance;
+}
+
+async function getCreditBalance(userId) {
+  const result = await pool.query(
+    `SELECT balance FROM user_credits WHERE user_id = $1`,
+    [userId]
+  );
+  return result.rows.length > 0 ? result.rows[0].balance : 0;
+}
+
+const BASE_REPAIR_COST = 500;
+const REPAIR_COST_INCREASE = 50;
+
+// Returns { balance, repairCost } for a user: current credit balance and
+// the cost of their NEXT repair (increases by 50 after each successful repair).
+async function getRepairInfo(userId) {
+  const result = await pool.query(
+    `SELECT balance, repair_count FROM user_credits WHERE user_id = $1`,
+    [userId]
+  );
+  const balance = result.rows.length > 0 ? result.rows[0].balance : 0;
+  const repairCount = result.rows.length > 0 ? result.rows[0].repair_count : 0;
+  const repairCost = BASE_REPAIR_COST + repairCount * REPAIR_COST_INCREASE;
+  return { balance, repairCost };
+}
+
+// Increments a user's repair count (used to raise the cost of their next repair)
+async function incrementRepairCount(userId) {
+  await pool.query(
+    `INSERT INTO user_credits (user_id, balance, repair_count)
+     VALUES ($1, 0, 1)
+     ON CONFLICT (user_id) DO UPDATE SET repair_count = user_credits.repair_count + 1`,
+    [userId]
+  );
+}
+
+// Records a catch, incrementing times_caught each time (even repeats).
+// Returns true if this is the first time this user caught this specific fish.
 async function recordCatch(userId, fishName) {
   const result = await pool.query(
-    `INSERT INTO catches (user_id, fish_name)
-     VALUES ($1, $2)
-     ON CONFLICT (user_id, fish_name) DO NOTHING
-     RETURNING fish_name`,
+    `INSERT INTO catches (user_id, fish_name, times_caught)
+     VALUES ($1, $2, 1)
+     ON CONFLICT (user_id, fish_name) DO UPDATE SET times_caught = catches.times_caught + 1
+     RETURNING (xmax = 0) AS inserted`,
     [userId, fishName]
   );
-  return result.rowCount > 0;
+  return result.rows[0].inserted;
 }
 
 async function getCollectionCount(userId) {
@@ -55,6 +120,15 @@ async function getCollectionCount(userId) {
     [userId]
   );
   return result.rows[0].count;
+}
+
+// Total number of fish caught by a user, counting repeats (sum of times_caught)
+async function getTotalCatches(userId) {
+  const result = await pool.query(
+    `SELECT COALESCE(SUM(times_caught), 0)::int AS total FROM catches WHERE user_id = $1`,
+    [userId]
+  );
+  return result.rows[0].total;
 }
 
 // Fish table: each fish has its own drop weight (in %) among successful catches.
@@ -189,11 +263,20 @@ client.once('ready', async () => {
   }
 });
 
-const REPAIR_MS = 60 * 60 * 1000; // 1 hour to repair a broken rod
+const REPAIR_MS = 60 * 60 * 1000; // 1 hour to repair a broken rod passively (if the user does nothing)
 const BREAK_CHANCE = 0.05; // 5% chance to break the rod on each cast
 const NO_CATCH_CHANCE = 0.20; // 20% chance to catch nothing
-const rodBrokenUntil = new Map(); // userId -> timestamp when repair finishes
+const rodBrokenUntil = new Map(); // userId -> timestamp when passive repair finishes
 const currentlyFishing = new Set(); // userId currently fishing
+const currentlyRepairing = new Set(); // userId currently repairing their rod
+
+const BREAK_MESSAGES = [
+  (name) => `😡 ${name} snaps in a fit of rage and breaks their rod in half!`,
+  (name) => `🎣💢 ${name} loses their temper and hurls their rod into the deep water!`,
+  (name) => `🤬 ${name} smashes their fishing rod against a rock out of pure frustration!`,
+  (name) => `😤 ${name} storms off, stomping their rod into pieces!`,
+  (name) => `💥 ${name} slams the rod down so hard it shatters!`,
+];
 
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
@@ -257,11 +340,18 @@ client.on('messageCreate', async (message) => {
       }
       const newTag = isNew ? ' 🆕 **NEW!**' : '';
 
+      const creditAmount = CREDIT_VALUES[fish.rarity];
+      try {
+        await addCredits(userId, creditAmount);
+      } catch (e) {
+        console.error('Error adding credits:', e);
+      }
+
       let text;
       if (fish.rarity === 'Legendary') {
-        text = `🐟✨ ${displayName} caught a **${fish.name}** — ${emoji} **${fish.rarity}** catch! Incredible! ✨${newTag}`;
+        text = `🐟✨ ${displayName} caught a **${fish.name}** — ${emoji} **${fish.rarity}** catch! Incredible! ✨${newTag}\n💰 +${creditAmount} Bits Coins`;
       } else {
-        text = `🐟 ${displayName} caught a **${fish.name}** — ${emoji} ${fish.rarity}${newTag}`;
+        text = `🐟 ${displayName} caught a **${fish.name}** — ${emoji} ${fish.rarity}${newTag}\n💰 +${creditAmount} Bits Coins`;
       }
 
       try {
@@ -279,11 +369,82 @@ client.on('messageCreate', async (message) => {
     try {
       const count = await getCollectionCount(userId);
       const total = FISH_TABLE.length;
-      message.reply(`📖 ${displayName}'s collection: **${count}/${total}** different fish caught.`);
+      const balance = await getCreditBalance(userId);
+      const totalCatches = await getTotalCatches(userId);
+      message.reply(`📖 ${displayName}'s collection: **${count}/${total}** different fish caught.\n💰 Bits Coins: **${balance}**\n🎣 Total fish caught: **${totalCatches}**`);
     } catch (e) {
       console.error('Error fetching collection:', e);
       message.reply(`⚠️ Couldn't fetch your collection right now, try again later.`);
     }
+  }
+
+  if (message.content.trim().toLowerCase() === '!repair') {
+    const userId = message.author.id;
+    const now = Date.now();
+    const displayName = message.member?.displayName ?? message.author.username;
+
+    const repairEnd = rodBrokenUntil.get(userId);
+    if (!repairEnd || now >= repairEnd) {
+      message.reply(`🎣 ${displayName}, your fishing rod isn't broken, no need to repair it!`);
+      return;
+    }
+
+    if (currentlyRepairing.has(userId)) {
+      message.reply(`🔧 ${displayName} is already repairing their rod, be patient!`);
+      return;
+    }
+
+    let repairInfo;
+    try {
+      repairInfo = await getRepairInfo(userId);
+    } catch (e) {
+      console.error('Error fetching repair info:', e);
+      message.reply(`⚠️ Couldn't check your Bits Coins balance right now, try again later.`);
+      return;
+    }
+
+    if (repairInfo.balance < repairInfo.repairCost) {
+      message.reply(`💸 ${displayName}, you need **${repairInfo.repairCost}** Bits Coins to repair your rod, but you only have **${repairInfo.balance}**.`);
+      return;
+    }
+
+    currentlyRepairing.add(userId);
+    const waitMs = Math.floor(Math.random() * (120000 - 60000 + 1)) + 60000;
+    await message.reply(`🔧 ${displayName} starts repairing their fishing rod...`);
+
+    setTimeout(async () => {
+      currentlyRepairing.delete(userId);
+      try {
+        await addCredits(userId, -repairInfo.repairCost);
+        await incrementRepairCount(userId);
+        rodBrokenUntil.delete(userId);
+        await message.channel.send(`✅ ${displayName}'s fishing rod is repaired and ready to use! (-${repairInfo.repairCost} Bits Coins)`);
+      } catch (e) {
+        console.error('Error completing repair:', e);
+        currentlyRepairing.delete(userId);
+      }
+    }, waitMs);
+  }
+
+  if (message.content.trim().toLowerCase() === '!break') {
+    const userId = message.author.id;
+    const now = Date.now();
+    const displayName = message.member?.displayName ?? message.author.username;
+
+    const repairEnd = rodBrokenUntil.get(userId);
+    if (repairEnd && now < repairEnd) {
+      message.reply(`🎣💔 ${displayName}, your rod is already broken!`);
+      return;
+    }
+
+    if (currentlyFishing.has(userId)) {
+      message.reply(`🎣 ${displayName}, you can't do that while your line is in the water!`);
+      return;
+    }
+
+    rodBrokenUntil.set(userId, now + REPAIR_MS);
+    const flavor = BREAK_MESSAGES[Math.floor(Math.random() * BREAK_MESSAGES.length)];
+    message.reply(flavor(displayName));
   }
 });
 
