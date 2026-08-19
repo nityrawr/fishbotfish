@@ -265,9 +265,9 @@ client.on('messageCreate', async (message) => {
       }
 
       try {
-        await waitingMessage.edit(text);
+        await message.channel.send(text);
       } catch (e) {
-        console.error('Error editing message:', e);
+        console.error('Error sending message:', e);
       }
     }, waitMs);
   }
