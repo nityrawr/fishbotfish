@@ -75,6 +75,45 @@ async function getCreditBalance(userId) {
   return result.rows.length > 0 ? result.rows[0].balance : 0;
 }
 
+// Atomically transfers credits from one user to another.
+// Returns { success: true } on success, or { success: false, balance } if
+// the sender doesn't have enough credits.
+async function transferCredits(senderId, receiverId, amount) {
+  const dbClient = await pool.connect();
+  try {
+    await dbClient.query('BEGIN');
+    const res = await dbClient.query(
+      `SELECT balance FROM user_credits WHERE user_id = $1 FOR UPDATE`,
+      [senderId]
+    );
+    const balance = res.rows.length > 0 ? res.rows[0].balance : 0;
+
+    if (balance < amount) {
+      await dbClient.query('ROLLBACK');
+      return { success: false, balance };
+    }
+
+    await dbClient.query(
+      `UPDATE user_credits SET balance = balance - $2 WHERE user_id = $1`,
+      [senderId, amount]
+    );
+    await dbClient.query(
+      `INSERT INTO user_credits (user_id, balance)
+       VALUES ($1, $2)
+       ON CONFLICT (user_id) DO UPDATE SET balance = user_credits.balance + $2`,
+      [receiverId, amount]
+    );
+
+    await dbClient.query('COMMIT');
+    return { success: true };
+  } catch (e) {
+    await dbClient.query('ROLLBACK');
+    throw e;
+  } finally {
+    dbClient.release();
+  }
+}
+
 const BASE_REPAIR_COST = 500;
 const REPAIR_COST_INCREASE = 50;
 
@@ -449,6 +488,51 @@ client.on('messageCreate', async (message) => {
     rodBrokenUntil.set(userId, now + REPAIR_MS);
     const flavor = BREAK_MESSAGES[Math.floor(Math.random() * BREAK_MESSAGES.length)];
     message.reply(flavor(displayName));
+  }
+
+  if (message.content.trim().toLowerCase().startsWith('!give')) {
+    const senderId = message.author.id;
+    const senderName = message.member?.displayName ?? message.author.username;
+
+    const targetUser = message.mentions.users.first();
+    if (!targetUser) {
+      message.reply(`⚠️ ${senderName}, please mention who you want to give Bits Coins to, e.g. \`!give 100 @username\`.`);
+      return;
+    }
+
+    if (targetUser.bot) {
+      message.reply(`⚠️ ${senderName}, you can't give Bits Coins to a bot!`);
+      return;
+    }
+
+    if (targetUser.id === senderId) {
+      message.reply(`⚠️ ${senderName}, you can't give Bits Coins to yourself!`);
+      return;
+    }
+
+    // Strip mentions from the message so we can find the amount reliably
+    const contentWithoutMentions = message.content.replace(/<@!?\d+>/g, '').trim();
+    const parts = contentWithoutMentions.split(/\s+/); // e.g. ['!give', '1250']
+    const amount = parseInt(parts[1], 10);
+
+    if (!Number.isInteger(amount) || amount <= 0) {
+      message.reply(`⚠️ ${senderName}, please specify a valid positive amount, e.g. \`!give 100 @username\`.`);
+      return;
+    }
+
+    const targetName = message.mentions.members?.first()?.displayName ?? targetUser.username;
+
+    try {
+      const result = await transferCredits(senderId, targetUser.id, amount);
+      if (!result.success) {
+        message.reply(`💸 ${senderName}, you don't have enough Bits Coins! You have **${result.balance}**, but tried to give **${amount}**.`);
+        return;
+      }
+      message.reply(`💸 ${senderName} gave **${amount}** Bits Coins to ${targetName}!`);
+    } catch (e) {
+      console.error('Error transferring credits:', e);
+      message.reply(`⚠️ Something went wrong while transferring Bits Coins, try again later.`);
+    }
   }
 });
 
