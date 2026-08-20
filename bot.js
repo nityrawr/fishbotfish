@@ -257,23 +257,23 @@ const HOOK_TIERS = [
 // requires both enough Bits Coins AND meeting a specific in-game requirement
 // (fishdex completion %, a specific fish caught, or all 4 unique treasures).
 const TROPHIES = [
-  { key: 'rookie', name: 'Rookie', cost: 5000, type: 'completion', value: 20 },
-  { key: 'fisherman', name: 'Fisherman', cost: 1500, type: 'completion', value: 40 },
+  { key: 'rookie', name: 'Rookie', cost: 2500, type: 'completion', value: 20 },
+  { key: 'fisherman', name: 'Fisherman', cost: 5000, type: 'completion', value: 40 },
   { key: 'the-captain', name: 'The Captain', cost: 7500, type: 'completion', value: 60 },
-  { key: 'legendary-fisherman', name: 'The Legendary Fisherman', cost: 20000, type: 'completion', value: 80 },
-  { key: 'neptune', name: 'Neptune, God of the Sea', cost: 100000, type: 'completion', value: 100 },
-  { key: 'martin-brody', name: 'Martin Brody', cost: 25000, type: 'fish', value: 'Megalodon' },
-  { key: 'davy-jones', name: 'Davy Jones', cost: 25000, type: 'fish', value: 'Kraken' },
-  { key: 'jeremy-wade', name: 'Jeremy Wade', cost: 25000, type: 'fish', value: 'Giant dam catfish' },
-  { key: 'monster-hunter', name: 'Monster Hunter', cost: 25000, type: 'fish', value: 'Loch ness monster' },
-  { key: 'back-to-the-past', name: 'Back to the Past', cost: 25000, type: 'fish', value: 'Coelacanth' },
-  { key: 'snatcher', name: 'Snatcher', cost: 5000, type: 'fish', value: 'Lost purse' },
-  { key: 'money-bag', name: 'Money Bag', cost: 7500, type: 'fish', value: 'Bag of money' },
-  { key: 'golden-retriever', name: 'Golden Retriever', cost: 10000, type: 'fish', value: 'Gold bar' },
+  { key: 'legendary-fisherman', name: 'The Legendary Fisherman', cost: 10000, type: 'completion', value: 80 },
+  { key: 'neptune', name: 'Neptune, God of the Sea', cost: 25000, type: 'completion', value: 100 },
+  { key: 'martin-brody', name: 'Martin Brody', cost: 25000, type: 'fish', value: 'Megalodon', hidden: true },
+  { key: 'davy-jones', name: 'Davy Jones', cost: 25000, type: 'fish', value: 'Kraken', hidden: true },
+  { key: 'jeremy-wade', name: 'Jeremy Wade', cost: 25000, type: 'fish', value: 'Giant dam catfish', hidden: true },
+  { key: 'monster-hunter', name: 'Monster Hunter', cost: 25000, type: 'fish', value: 'Loch ness monster', hidden: true },
+  { key: 'back-to-the-past', name: 'Back to the Past', cost: 25000, type: 'fish', value: 'Coelacanth', hidden: true },
+  { key: 'snatcher', name: 'Snatcher', cost: 2500, type: 'fish', value: 'Lost purse' },
+  { key: 'money-bag', name: 'Money Bag', cost: 5000, type: 'fish', value: 'Bag of money' },
+  { key: 'golden-retriever', name: 'Golden Retriever', cost: 7500, type: 'fish', value: 'Gold bar' },
   {
     key: 'pirate-seven-seas',
     name: 'Pirate of the Seven Seas',
-    cost: 12500,
+    cost: 10000,
     type: 'allUniques',
     value: ['Lost purse', 'Bag of money', 'Gold bar', 'Long thought forgotten treasure'],
   },
@@ -292,9 +292,12 @@ async function checkTrophyRequirement(userId, trophy) {
   }
   if (trophy.type === 'fish') {
     const caughtSet = await getCaughtFishNames(userId);
+    const met = caughtSet.has(trophy.value);
     return {
-      met: caughtSet.has(trophy.value),
-      reason: `Requires catching **${trophy.value}** first.`,
+      met,
+      reason: trophy.hidden
+        ? `Requires catching a specific, mysterious legendary creature... 🕵️`
+        : `Requires catching **${trophy.value}** first.`,
     };
   }
   if (trophy.type === 'allUniques') {
@@ -816,7 +819,7 @@ client.on('messageCreate', async (message) => {
     const trophyOptions = TROPHIES.map((trophy) => {
       let reqText;
       if (trophy.type === 'completion') reqText = `Requires ${trophy.value}% Fishdex completion`;
-      else if (trophy.type === 'fish') reqText = `Requires catching: ${trophy.value}`;
+      else if (trophy.type === 'fish') reqText = trophy.hidden ? `Requires catching a mysterious legendary creature` : `Requires catching: ${trophy.value}`;
       else reqText = `Requires all 4 unique treasures`;
       return {
         label: `${trophy.name} — ${trophy.cost.toLocaleString('en-US')} Bits Coins`,
