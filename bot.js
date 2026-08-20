@@ -7,7 +7,12 @@
 //   4. node bot.js
 // -------------------------------------------------
 
-const { Client, GatewayIntentBits } = require('discord.js');
+const {
+  Client,
+  GatewayIntentBits,
+  ActionRowBuilder,
+  StringSelectMenuBuilder,
+} = require('discord.js');
 const { Pool } = require('pg');
 
 const client = new Client({
@@ -42,6 +47,12 @@ async function initDatabase() {
       user_id TEXT PRIMARY KEY,
       balance INTEGER NOT NULL DEFAULT 0,
       repair_count INTEGER NOT NULL DEFAULT 0
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_upgrades (
+      user_id TEXT PRIMARY KEY,
+      hook_tier INTEGER NOT NULL DEFAULT 0
     )
   `);
 }
@@ -169,6 +180,37 @@ async function getTotalCatches(userId) {
   );
   return result.rows[0].total;
 }
+
+// Returns the hook upgrade tier a user currently owns (0 = no upgrade)
+async function getHookTier(userId) {
+  const result = await pool.query(
+    `SELECT hook_tier FROM user_upgrades WHERE user_id = $1`,
+    [userId]
+  );
+  return result.rows.length > 0 ? result.rows[0].hook_tier : 0;
+}
+
+async function setHookTier(userId, tier) {
+  await pool.query(
+    `INSERT INTO user_upgrades (user_id, hook_tier)
+     VALUES ($1, $2)
+     ON CONFLICT (user_id) DO UPDATE SET hook_tier = $2`,
+    [userId, tier]
+  );
+}
+
+// Hook upgrade tiers, purchasable in the !shop. Index 0 is unused (tier 0 =
+// no upgrade owned, base 4% break chance). chances[i] is the probability of
+// catching the (i+2)th fish, only rolled if the previous one succeeded.
+const HOOK_TIERS = [
+  null,
+  { name: 'Double-hook I', cost: 7500, breakChance: 0.045, chances: [0.10] },
+  { name: 'Double-hook II', cost: 12500, breakChance: 0.05, chances: [0.20] },
+  { name: 'Triple-hook I', cost: 25000, breakChance: 0.065, chances: [0.25, 0.10] },
+  { name: 'Triple-hook II', cost: 42500, breakChance: 0.075, chances: [0.40, 0.25] },
+  { name: 'Multi-hook I', cost: 150000, breakChance: 0.085, chances: [0.50, 0.30, 0.15, 0.08] },
+  { name: 'Multi-hook II', cost: 250000, breakChance: 0.10, chances: [0.75, 0.50, 0.30, 0.16] },
+];
 
 // Fish table: each fish has its own drop weight (in %) among successful catches.
 // Weights are normalized so they sum to ~100.
@@ -344,6 +386,42 @@ const BREAK_MESSAGES = [
   (name) => `💥 ${name} slams the rod down so hard it shatters!`,
 ];
 
+// Resolves a single fish catch: picks a fish, applies weight/credit variation,
+// records it and awards credits. Returns a formatted line of text for this catch.
+async function resolveSingleCatch(userId) {
+  const fish = pickFish();
+  const emoji = RARITY_EMOJI[fish.rarity];
+
+  let isNew = false;
+  try {
+    isNew = await recordCatch(userId, fish.name);
+  } catch (e) {
+    console.error('Error recording catch:', e);
+  }
+  const newTag = isNew ? ' 🆕 **NEW!**' : '';
+
+  // Roll a single ±40% variation factor, applied to both the catch's
+  // weight and the credits earned (a heavier catch pays out more).
+  const variationFactor = rollVariationFactor();
+  const baseCreditAmount = fish.customCredit ?? CREDIT_VALUES[fish.rarity];
+  const creditAmount = Math.max(1, Math.round(baseCreditAmount * variationFactor));
+
+  try {
+    await addCredits(userId, creditAmount);
+  } catch (e) {
+    console.error('Error adding credits:', e);
+  }
+
+  const weightText = fish.baseWeightGrams
+    ? ` (${formatWeight(fish.baseWeightGrams * variationFactor)})`
+    : '';
+
+  if (fish.rarity.startsWith('Legendary')) {
+    return `🐟✨ **${fish.name}**${weightText} — ${emoji} **${fish.rarity}** catch! Incredible! ✨${newTag} (+${creditAmount} Bits Coins)`;
+  }
+  return `🐟 **${fish.name}**${weightText} — ${emoji} ${fish.rarity}${newTag} (+${creditAmount} Bits Coins)`;
+}
+
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
 
@@ -367,6 +445,18 @@ client.on('messageCreate', async (message) => {
       return;
     }
 
+    // Determine this user's break chance and multi-catch chances based on
+    // their owned hook upgrade tier (0 = no upgrade, base 4% break chance)
+    let hookTier = 0;
+    try {
+      hookTier = await getHookTier(userId);
+    } catch (e) {
+      console.error('Error fetching hook tier:', e);
+    }
+    const tierData = hookTier > 0 ? HOOK_TIERS[hookTier] : null;
+    const breakChance = tierData ? tierData.breakChance : BREAK_CHANCE;
+    const bonusChances = tierData ? tierData.chances : [];
+
     currentlyFishing.add(userId);
     const waitMs = Math.floor(Math.random() * (35000 - 15000 + 1)) + 15000;
     const waitingMessage = await message.reply(`🎣 ${displayName} cast his line into the water...`);
@@ -375,7 +465,7 @@ client.on('messageCreate', async (message) => {
       currentlyFishing.delete(userId);
 
       // Does the rod break?
-      if (Math.random() < BREAK_CHANCE) {
+      if (Math.random() < breakChance) {
         rodBrokenUntil.set(userId, Date.now() + REPAIR_MS);
         try {
           await waitingMessage.edit(`💥 Snap! ${displayName}'s fishing rod broke! It will take 1 hour to repair.`);
@@ -385,8 +475,46 @@ client.on('messageCreate', async (message) => {
         return;
       }
 
-      // Nothing biting this time?
-      if (Math.random() < NO_CATCH_CHANCE) {
+      // Each hook is a separate line in the water. Hooks try one after
+      // another as "the first" (using the standard base catch chance) until
+      // one of them actually catches a fish — so a miss on hook 1 doesn't
+      // waste hook 2, it just gets the same odds hook 1 had. Once ONE fish
+      // is caught, any remaining hooks then try for BONUS fish using this
+      // tier's (smaller) bonus chances, chained in order — each bonus only
+      // rolled if the previous one succeeded. If every hook misses its
+      // "first fish" attempt, nothing is caught at all.
+      const hookCount = tierData ? tierData.chances.length + 1 : 1;
+      const catchLines = [];
+      try {
+        let hooksLeft = hookCount;
+        let hasCaughtFirst = false;
+        let bonusIndex = 0;
+
+        while (hooksLeft > 0) {
+          hooksLeft--;
+
+          if (!hasCaughtFirst) {
+            // This hook attempts as if it were the very first one
+            if (Math.random() >= NO_CATCH_CHANCE) {
+              hasCaughtFirst = true;
+              catchLines.push(await resolveSingleCatch(userId));
+            }
+            // otherwise: this hook missed, the next one gets the same shot
+          } else {
+            // We already have a fish — remaining hooks try for a bonus catch
+            if (bonusIndex < bonusChances.length && Math.random() < bonusChances[bonusIndex]) {
+              catchLines.push(await resolveSingleCatch(userId));
+              bonusIndex++;
+            } else {
+              break; // bonus chain stops on the first failed roll
+            }
+          }
+        }
+      } catch (e) {
+        console.error('Error resolving catch:', e);
+      }
+
+      if (catchLines.length === 0) {
         try {
           await waitingMessage.edit(`🎣 ${displayName} waited patiently... but nothing was biting today.`);
         } catch (e) {
@@ -395,39 +523,11 @@ client.on('messageCreate', async (message) => {
         return;
       }
 
-      const fish = pickFish();
-      const emoji = RARITY_EMOJI[fish.rarity];
-
-      let isNew = false;
-      try {
-        isNew = await recordCatch(userId, fish.name);
-      } catch (e) {
-        console.error('Error recording catch:', e);
-      }
-      const newTag = isNew ? ' 🆕 **NEW!**' : '';
-
-      // Roll a single ±40% variation factor, applied to both the catch's
-      // weight and the credits earned (a heavier catch pays out more).
-      const variationFactor = rollVariationFactor();
-      const baseCreditAmount = fish.customCredit ?? CREDIT_VALUES[fish.rarity];
-      const creditAmount = Math.max(1, Math.round(baseCreditAmount * variationFactor));
-
-      try {
-        await addCredits(userId, creditAmount);
-      } catch (e) {
-        console.error('Error adding credits:', e);
-      }
-
-      const weightText = fish.baseWeightGrams
-        ? ` (${formatWeight(fish.baseWeightGrams * variationFactor)})`
-        : '';
-
-      let text;
-      if (fish.rarity.startsWith('Legendary')) {
-        text = `🐟✨ ${displayName} caught a **${fish.name}**${weightText} — ${emoji} **${fish.rarity}** catch! Incredible! ✨${newTag}\n💰 +${creditAmount} Bits Coins`;
-      } else {
-        text = `🐟 ${displayName} caught a **${fish.name}**${weightText} — ${emoji} ${fish.rarity}${newTag}\n💰 +${creditAmount} Bits Coins`;
-      }
+      const header =
+        catchLines.length > 1
+          ? `🎏 ${displayName} reeled in **${catchLines.length} fish** at once!\n`
+          : `${displayName} `;
+      const text = header + catchLines.join('\n');
 
       try {
         await message.reply(text);
@@ -566,6 +666,81 @@ client.on('messageCreate', async (message) => {
       console.error('Error transferring credits:', e);
       message.reply(`⚠️ Something went wrong while transferring Bits Coins, try again later.`);
     }
+  }
+
+  if (message.content.trim().toLowerCase() === '!shop') {
+    const options = HOOK_TIERS.slice(1).map((tier, index) => {
+      const tierNumber = index + 1; // real tier index (1-6)
+      const chancesText = tier.chances
+        .map((c, i) => `${Math.round(c * 100)}% for fish #${i + 2}`)
+        .join(', ');
+      return {
+        label: `${tier.name} — ${tier.cost.toLocaleString('en-US')} Bits Coins`,
+        description: `${chancesText} | Rod break: ${(tier.breakChance * 100).toFixed(1)}%`.slice(0, 100),
+        value: String(tierNumber),
+      };
+    });
+
+    const selectMenu = new StringSelectMenuBuilder()
+      .setCustomId('shop_hook_upgrade')
+      .setPlaceholder('Choose an upgrade to buy...')
+      .addOptions(options);
+
+    const row = new ActionRowBuilder().addComponents(selectMenu);
+
+    await message.reply({
+      content: `🎣 **UPGRADES SHOP** — Hook upgrades let you catch multiple fish at once, at the cost of a higher rod break chance. Pick one below (only you will see the purchase result):`,
+      components: [row],
+    });
+  }
+});
+
+// Handles the !shop select menu purchases. Interaction replies here are
+// ephemeral, so the purchase result is only visible to the buyer — the
+// shop message itself stays as the single, permanent channel message.
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isStringSelectMenu()) return;
+  if (interaction.customId !== 'shop_hook_upgrade') return;
+
+  const userId = interaction.user.id;
+  const displayName = interaction.member?.displayName ?? interaction.user.username;
+  const chosenTier = parseInt(interaction.values[0], 10);
+  const tierData = HOOK_TIERS[chosenTier];
+
+  if (!tierData) {
+    await interaction.reply({ content: `⚠️ Invalid upgrade selection.`, ephemeral: true });
+    return;
+  }
+
+  try {
+    const currentTier = await getHookTier(userId);
+    if (currentTier === chosenTier) {
+      await interaction.reply({
+        content: `🎣 ${displayName}, you already own **${tierData.name}**!`,
+        ephemeral: true,
+      });
+      return;
+    }
+
+    const balance = await getCreditBalance(userId);
+    if (balance < tierData.cost) {
+      await interaction.reply({
+        content: `💸 ${displayName}, you need **${tierData.cost.toLocaleString('en-US')}** Bits Coins for **${tierData.name}**, but you only have **${balance}**.`,
+        ephemeral: true,
+      });
+      return;
+    }
+
+    await addCredits(userId, -tierData.cost);
+    await setHookTier(userId, chosenTier);
+
+    await interaction.reply({
+      content: `✅ ${displayName} purchased **${tierData.name}**! Your fishing rod now has a **${(tierData.breakChance * 100).toFixed(1)}%** break chance, with a shot at catching multiple fish per cast.`,
+      ephemeral: true,
+    });
+  } catch (e) {
+    console.error('Error processing shop purchase:', e);
+    await interaction.reply({ content: `⚠️ Something went wrong with your purchase, try again later.`, ephemeral: true });
   }
 });
 
