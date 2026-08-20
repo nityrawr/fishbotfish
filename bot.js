@@ -181,6 +181,23 @@ async function getTotalCatches(userId) {
   return result.rows[0].total;
 }
 
+// Returns a Set of fish names this user has caught at least once
+async function getCaughtFishNames(userId) {
+  const result = await pool.query(
+    `SELECT fish_name FROM catches WHERE user_id = $1`,
+    [userId]
+  );
+  return new Set(result.rows.map((r) => r.fish_name));
+}
+
+async function getTimesCaughtForFish(userId, fishName) {
+  const result = await pool.query(
+    `SELECT times_caught FROM catches WHERE user_id = $1 AND fish_name = $2`,
+    [userId, fishName]
+  );
+  return result.rows.length > 0 ? result.rows[0].times_caught : 0;
+}
+
 // Returns the hook upgrade tier a user currently owns (0 = no upgrade)
 async function getHookTier(userId) {
   const result = await pool.query(
@@ -204,12 +221,12 @@ async function setHookTier(userId, tier) {
 // catching the (i+2)th fish, only rolled if the previous one succeeded.
 const HOOK_TIERS = [
   null,
-  { name: 'Double-hook I', cost: 7500, breakChance: 0.045, chances: [0.10] },
-  { name: 'Double-hook II', cost: 12500, breakChance: 0.05, chances: [0.20] },
-  { name: 'Triple-hook I', cost: 25000, breakChance: 0.065, chances: [0.25, 0.10] },
-  { name: 'Triple-hook II', cost: 42500, breakChance: 0.075, chances: [0.40, 0.25] },
-  { name: 'Multi-hook I', cost: 150000, breakChance: 0.085, chances: [0.50, 0.30, 0.15, 0.08] },
-  { name: 'Multi-hook II', cost: 250000, breakChance: 0.10, chances: [0.75, 0.50, 0.30, 0.16] },
+  { name: 'Double-hook I', cost: 3000, breakChance: 0.045, chances: [0.10] },
+  { name: 'Double-hook II', cost: 5000, breakChance: 0.05, chances: [0.20] },
+  { name: 'Triple-hook I', cost: 15000, breakChance: 0.055, chances: [0.25, 0.10] },
+  { name: 'Triple-hook II', cost: 25000, breakChance: 0.06, chances: [0.40, 0.25] },
+  { name: 'Multi-hook I', cost: 75000, breakChance: 0.065, chances: [0.50, 0.30, 0.15, 0.08] },
+  { name: 'Multi-hook II', cost: 100000, breakChance: 0.07, chances: [0.75, 0.50, 0.30, 0.16] },
 ];
 
 // Fish table: each fish has its own drop weight (in %) among successful catches.
@@ -547,7 +564,38 @@ client.on('messageCreate', async (message) => {
       const balance = await getCreditBalance(userId);
       const totalCatches = await getTotalCatches(userId);
       const percentage = ((count / total) * 100).toFixed(1);
-      message.reply(`📖 ${displayName}'s collection: **${count}/${total}** (${percentage}%) different fish caught.\n💰 Bits Coins: **${balance}**\n🎣 Total fish caught: **${totalCatches}**`);
+      const hookTier = await getHookTier(userId);
+      const equippedName = hookTier > 0 ? HOOK_TIERS[hookTier].name : 'None';
+      const caughtSet = await getCaughtFishNames(userId);
+
+      const statsText = `📖 ${displayName}'s collection: **${count}/${total}** (${percentage}%) different fish caught.\n💰 Bits Coins: **${balance}**\n🎣 Total fish caught: **${totalCatches}**\n🪝 Equipped upgrade: **${equippedName}**`;
+
+      // Build up to 4 dropdowns (Discord caps a select menu at 25 options),
+      // covering all 97 fish in the same order as FISH_TABLE (rarity order).
+      const PAGE_SIZE = 25;
+      const rows = [];
+      for (let start = 0; start < FISH_TABLE.length; start += PAGE_SIZE) {
+        const pageFish = FISH_TABLE.slice(start, start + PAGE_SIZE);
+        const options = pageFish.map((fish, i) => {
+          const globalIndex = start + i;
+          const caught = caughtSet.has(fish.name);
+          const label = `${globalIndex + 1}: ${caught ? fish.name : '???'}`.slice(0, 100);
+          return {
+            label,
+            value: String(globalIndex),
+            ...(caught ? { description: fish.rarity } : {}),
+          };
+        });
+
+        const selectMenu = new StringSelectMenuBuilder()
+          .setCustomId(`fishdex_page_${start / PAGE_SIZE}`)
+          .setPlaceholder(`Fish #${start + 1}-${start + pageFish.length}`)
+          .addOptions(options);
+
+        rows.push(new ActionRowBuilder().addComponents(selectMenu));
+      }
+
+      await message.reply({ content: statsText, components: rows });
     } catch (e) {
       console.error('Error fetching collection:', e);
       message.reply(`⚠️ Couldn't fetch your collection right now, try again later.`);
@@ -695,11 +743,49 @@ client.on('messageCreate', async (message) => {
   }
 });
 
-// Handles the !shop select menu purchases. Interaction replies here are
-// ephemeral, so the purchase result is only visible to the buyer — the
-// shop message itself stays as the single, permanent channel message.
+// Handles select menu interactions: !shop purchases and !fishdex browsing.
+// Replies here are ephemeral, so results are only visible to the person who
+// interacted — the original message (shop or fishdex) stays as-is.
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isStringSelectMenu()) return;
+
+  if (interaction.customId.startsWith('fishdex_page_')) {
+    const userId = interaction.user.id;
+    const chosenIndex = parseInt(interaction.values[0], 10);
+    const fish = FISH_TABLE[chosenIndex];
+
+    if (!fish) {
+      await interaction.reply({ content: `⚠️ Invalid fish selection.`, ephemeral: true });
+      return;
+    }
+
+    try {
+      const caughtSet = await getCaughtFishNames(userId);
+      if (!caughtSet.has(fish.name)) {
+        await interaction.reply({
+          content: `❓ You haven't caught fish **#${chosenIndex + 1}** yet — keep fishing to reveal it!`,
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const timesCaught = await getTimesCaughtForFish(userId, fish.name);
+      const emoji = RARITY_EMOJI[fish.rarity];
+      let detail = `🐟 **#${chosenIndex + 1}: ${fish.name}** — ${emoji} ${fish.rarity}\nCaught **${timesCaught}** time(s).`;
+      if (fish.baseWeightGrams) {
+        const min = formatWeight(fish.baseWeightGrams * 0.6);
+        const max = formatWeight(fish.baseWeightGrams * 1.4);
+        detail += `\nWeight range: ${min} – ${max}`;
+      }
+
+      await interaction.reply({ content: detail, ephemeral: true });
+    } catch (e) {
+      console.error('Error fetching fish detail:', e);
+      await interaction.reply({ content: `⚠️ Something went wrong, try again later.`, ephemeral: true });
+    }
+    return;
+  }
+
   if (interaction.customId !== 'shop_hook_upgrade') return;
 
   const userId = interaction.user.id;
@@ -714,9 +800,10 @@ client.on('interactionCreate', async (interaction) => {
 
   try {
     const currentTier = await getHookTier(userId);
-    if (currentTier === chosenTier) {
+    if (chosenTier <= currentTier) {
+      const ownedName = currentTier > 0 ? HOOK_TIERS[currentTier].name : 'no upgrade';
       await interaction.reply({
-        content: `🎣 ${displayName}, you already own **${tierData.name}**!`,
+        content: `🎣 ${displayName}, you already own **${ownedName}**, which is the same tier or better than **${tierData.name}**. No need to buy it!`,
         ephemeral: true,
       });
       return;
@@ -735,7 +822,7 @@ client.on('interactionCreate', async (interaction) => {
     await setHookTier(userId, chosenTier);
 
     await interaction.reply({
-      content: `✅ ${displayName} purchased **${tierData.name}**! Your fishing rod now has a **${(tierData.breakChance * 100).toFixed(1)}%** break chance, with a shot at catching multiple fish per cast.`,
+      content: `✅ ${displayName} upgraded to **${tierData.name}**! Your fishing rod now has a **${(tierData.breakChance * 100).toFixed(1)}%** break chance, with a shot at catching multiple fish per cast. (This replaces your previous hook upgrade.)`,
       ephemeral: true,
     });
   } catch (e) {
