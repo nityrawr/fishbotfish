@@ -55,6 +55,14 @@ async function initDatabase() {
       hook_tier INTEGER NOT NULL DEFAULT 0
     )
   `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_trophies (
+      user_id TEXT NOT NULL,
+      trophy_key TEXT NOT NULL,
+      earned_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (user_id, trophy_key)
+    )
+  `);
 }
 
 // Credits awarded per rarity when a fish is caught
@@ -198,6 +206,22 @@ async function getTimesCaughtForFish(userId, fishName) {
   return result.rows.length > 0 ? result.rows[0].times_caught : 0;
 }
 
+// Returns a Set of trophy keys a user already owns
+async function getOwnedTrophies(userId) {
+  const result = await pool.query(
+    `SELECT trophy_key FROM user_trophies WHERE user_id = $1`,
+    [userId]
+  );
+  return new Set(result.rows.map((r) => r.trophy_key));
+}
+
+async function addTrophy(userId, trophyKey) {
+  await pool.query(
+    `INSERT INTO user_trophies (user_id, trophy_key) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+    [userId, trophyKey]
+  );
+}
+
 // Returns the hook upgrade tier a user currently owns (0 = no upgrade)
 async function getHookTier(userId) {
   const result = await pool.query(
@@ -228,6 +252,61 @@ const HOOK_TIERS = [
   { name: 'Multi-hook I', cost: 75000, breakChance: 0.065, chances: [0.50, 0.30, 0.15, 0.08] },
   { name: 'Multi-hook II', cost: 100000, breakChance: 0.07, chances: [0.75, 0.50, 0.30, 0.16] },
 ];
+
+// Trophies, purchasable in the !shop under the "Trophies" category. Each one
+// requires both enough Bits Coins AND meeting a specific in-game requirement
+// (fishdex completion %, a specific fish caught, or all 4 unique treasures).
+const TROPHIES = [
+  { key: 'rookie', name: 'Rookie', cost: 5000, type: 'completion', value: 20 },
+  { key: 'fisherman', name: 'Fisherman', cost: 1500, type: 'completion', value: 40 },
+  { key: 'the-captain', name: 'The Captain', cost: 7500, type: 'completion', value: 60 },
+  { key: 'legendary-fisherman', name: 'The Legendary Fisherman', cost: 20000, type: 'completion', value: 80 },
+  { key: 'neptune', name: 'Neptune, God of the Sea', cost: 100000, type: 'completion', value: 100 },
+  { key: 'martin-brody', name: 'Martin Brody', cost: 25000, type: 'fish', value: 'Megalodon' },
+  { key: 'davy-jones', name: 'Davy Jones', cost: 25000, type: 'fish', value: 'Kraken' },
+  { key: 'jeremy-wade', name: 'Jeremy Wade', cost: 25000, type: 'fish', value: 'Giant dam catfish' },
+  { key: 'monster-hunter', name: 'Monster Hunter', cost: 25000, type: 'fish', value: 'Loch ness monster' },
+  { key: 'back-to-the-past', name: 'Back to the Past', cost: 25000, type: 'fish', value: 'Coelacanth' },
+  { key: 'snatcher', name: 'Snatcher', cost: 5000, type: 'fish', value: 'Lost purse' },
+  { key: 'money-bag', name: 'Money Bag', cost: 7500, type: 'fish', value: 'Bag of money' },
+  { key: 'golden-retriever', name: 'Golden Retriever', cost: 10000, type: 'fish', value: 'Gold bar' },
+  {
+    key: 'pirate-seven-seas',
+    name: 'Pirate of the Seven Seas',
+    cost: 12500,
+    type: 'allUniques',
+    value: ['Lost purse', 'Bag of money', 'Gold bar', 'Long thought forgotten treasure'],
+  },
+];
+
+// Checks whether a user currently meets a trophy's in-game requirement
+// (separate from whether they can afford it). Returns { met, reason }.
+async function checkTrophyRequirement(userId, trophy) {
+  if (trophy.type === 'completion') {
+    const count = await getCollectionCount(userId);
+    const percent = (count / FISH_TABLE.length) * 100;
+    return {
+      met: percent >= trophy.value,
+      reason: `Requires **${trophy.value}%** Fishdex completion (you're at **${percent.toFixed(1)}%**).`,
+    };
+  }
+  if (trophy.type === 'fish') {
+    const caughtSet = await getCaughtFishNames(userId);
+    return {
+      met: caughtSet.has(trophy.value),
+      reason: `Requires catching **${trophy.value}** first.`,
+    };
+  }
+  if (trophy.type === 'allUniques') {
+    const caughtSet = await getCaughtFishNames(userId);
+    const missing = trophy.value.filter((name) => !caughtSet.has(name));
+    return {
+      met: missing.length === 0,
+      reason: missing.length > 0 ? `Still missing: ${missing.join(', ')}.` : '',
+    };
+  }
+  return { met: false, reason: 'Unknown requirement.' };
+}
 
 // Fish table: each fish has its own drop weight (in %) among successful catches.
 // Weights are normalized so they sum to ~100.
@@ -717,7 +796,7 @@ client.on('messageCreate', async (message) => {
   }
 
   if (message.content.trim().toLowerCase() === '!shop') {
-    const options = HOOK_TIERS.slice(1).map((tier, index) => {
+    const upgradeOptions = HOOK_TIERS.slice(1).map((tier, index) => {
       const tierNumber = index + 1; // real tier index (1-6)
       const chancesText = tier.chances
         .map((c, i) => `${Math.round(c * 100)}% for fish #${i + 2}`)
@@ -729,16 +808,36 @@ client.on('messageCreate', async (message) => {
       };
     });
 
-    const selectMenu = new StringSelectMenuBuilder()
+    const upgradeMenu = new StringSelectMenuBuilder()
       .setCustomId('shop_hook_upgrade')
-      .setPlaceholder('Choose an upgrade to buy...')
-      .addOptions(options);
+      .setPlaceholder('🪝 Upgrades — choose an upgrade to buy...')
+      .addOptions(upgradeOptions);
 
-    const row = new ActionRowBuilder().addComponents(selectMenu);
+    const trophyOptions = TROPHIES.map((trophy) => {
+      let reqText;
+      if (trophy.type === 'completion') reqText = `Requires ${trophy.value}% Fishdex completion`;
+      else if (trophy.type === 'fish') reqText = `Requires catching: ${trophy.value}`;
+      else reqText = `Requires all 4 unique treasures`;
+      return {
+        label: `${trophy.name} — ${trophy.cost.toLocaleString('en-US')} Bits Coins`,
+        description: reqText.slice(0, 100),
+        value: trophy.key,
+      };
+    });
+
+    const trophyMenu = new StringSelectMenuBuilder()
+      .setCustomId('shop_trophy')
+      .setPlaceholder('🏆 Trophies — choose a trophy to buy...')
+      .addOptions(trophyOptions);
+
+    const rows = [
+      new ActionRowBuilder().addComponents(upgradeMenu),
+      new ActionRowBuilder().addComponents(trophyMenu),
+    ];
 
     await message.reply({
-      content: `🎣 **UPGRADES SHOP** — Hook upgrades let you catch multiple fish at once, at the cost of a higher rod break chance. Pick one below (only you will see the purchase result):`,
-      components: [row],
+      content: `🎣 **SHOP**\n🪝 **Upgrades** — hook upgrades let you catch multiple fish at once, at the cost of a higher rod break chance.\n🏆 **Trophies** — cosmetic trophies that require both Bits Coins AND meeting a specific in-game achievement.\nPick one below (only you will see the purchase result):`,
+      components: rows,
     });
   }
 });
@@ -782,6 +881,59 @@ client.on('interactionCreate', async (interaction) => {
     } catch (e) {
       console.error('Error fetching fish detail:', e);
       await interaction.reply({ content: `⚠️ Something went wrong, try again later.`, ephemeral: true });
+    }
+    return;
+  }
+
+  if (interaction.customId === 'shop_trophy') {
+    const userId = interaction.user.id;
+    const displayName = interaction.member?.displayName ?? interaction.user.username;
+    const trophyKey = interaction.values[0];
+    const trophy = TROPHIES.find((t) => t.key === trophyKey);
+
+    if (!trophy) {
+      await interaction.reply({ content: `⚠️ Invalid trophy selection.`, ephemeral: true });
+      return;
+    }
+
+    try {
+      const owned = await getOwnedTrophies(userId);
+      if (owned.has(trophy.key)) {
+        await interaction.reply({
+          content: `🏆 ${displayName}, you already own the **${trophy.name}** trophy!`,
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const { met, reason } = await checkTrophyRequirement(userId, trophy);
+      if (!met) {
+        await interaction.reply({
+          content: `🔒 ${displayName}, you don't meet the requirement for **${trophy.name}** yet.\n${reason}`,
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const balance = await getCreditBalance(userId);
+      if (balance < trophy.cost) {
+        await interaction.reply({
+          content: `💸 ${displayName}, you need **${trophy.cost.toLocaleString('en-US')}** Bits Coins for **${trophy.name}**, but you only have **${balance}**.`,
+          ephemeral: true,
+        });
+        return;
+      }
+
+      await addCredits(userId, -trophy.cost);
+      await addTrophy(userId, trophy.key);
+
+      await interaction.reply({
+        content: `🏆 ${displayName} earned the **${trophy.name}** trophy!`,
+        ephemeral: true,
+      });
+    } catch (e) {
+      console.error('Error processing trophy purchase:', e);
+      await interaction.reply({ content: `⚠️ Something went wrong with your purchase, try again later.`, ephemeral: true });
     }
     return;
   }
