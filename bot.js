@@ -276,12 +276,12 @@ async function addOwnedUpgradeTier(userId, tier) {
 // catching the (i+2)th fish, only rolled if the previous one succeeded.
 const HOOK_TIERS = [
   null,
-  { name: 'Double-hook I', cost: 3000, breakChance: 0.045, chances: [0.10] },
-  { name: 'Double-hook II', cost: 5000, breakChance: 0.05, chances: [0.20] },
-  { name: 'Triple-hook I', cost: 15000, breakChance: 0.055, chances: [0.25, 0.10] },
-  { name: 'Triple-hook II', cost: 25000, breakChance: 0.06, chances: [0.40, 0.25] },
-  { name: 'Multi-hook I', cost: 75000, breakChance: 0.065, chances: [0.50, 0.30, 0.15, 0.08] },
-  { name: 'Multi-hook II', cost: 100000, breakChance: 0.07, chances: [0.75, 0.50, 0.30, 0.16] },
+  { name: 'Double-hook I', cost: 3000, breakChance: 0.045, chances: [0.35] },
+  { name: 'Double-hook II', cost: 5000, breakChance: 0.05, chances: [0.65] },
+  { name: 'Triple-hook I', cost: 15000, breakChance: 0.055, chances: [0.70, 0.25] },
+  { name: 'Triple-hook II', cost: 25000, breakChance: 0.06, chances: [0.75, 0.45] },
+  { name: 'Multi-hook I', cost: 75000, breakChance: 0.065, chances: [0.80, 0.60, 0.40, 0.20] },
+  { name: 'Multi-hook II', cost: 100000, breakChance: 0.07, chances: [0.90, 0.75, 0.50, 0.35] },
 ];
 
 // Trophies, purchasable in the !shop under the "Trophies" category. Each one
