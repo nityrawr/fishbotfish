@@ -63,6 +63,20 @@ async function initDatabase() {
       PRIMARY KEY (user_id, trophy_key)
     )
   `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_owned_upgrades (
+      user_id TEXT NOT NULL,
+      tier INTEGER NOT NULL,
+      PRIMARY KEY (user_id, tier)
+    )
+  `);
+  // Backfill: anyone who already has an equipped tier from before this table
+  // existed gets that tier marked as owned, so they don't lose access to it.
+  await pool.query(`
+    INSERT INTO user_owned_upgrades (user_id, tier)
+    SELECT user_id, hook_tier FROM user_upgrades WHERE hook_tier > 0
+    ON CONFLICT DO NOTHING
+  `);
 }
 
 // Credits awarded per rarity when a fish is caught
@@ -236,6 +250,23 @@ async function setHookTier(userId, tier) {
     `INSERT INTO user_upgrades (user_id, hook_tier)
      VALUES ($1, $2)
      ON CONFLICT (user_id) DO UPDATE SET hook_tier = $2`,
+    [userId, tier]
+  );
+}
+
+// Returns a Set of tier numbers a user has ever purchased (can switch back
+// to any of these at any time via !inventory, without paying again).
+async function getOwnedUpgradeTiers(userId) {
+  const result = await pool.query(
+    `SELECT tier FROM user_owned_upgrades WHERE user_id = $1`,
+    [userId]
+  );
+  return new Set(result.rows.map((r) => r.tier));
+}
+
+async function addOwnedUpgradeTier(userId, tier) {
+  await pool.query(
+    `INSERT INTO user_owned_upgrades (user_id, tier) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
     [userId, tier]
   );
 }
@@ -643,14 +674,11 @@ client.on('messageCreate', async (message) => {
     try {
       const count = await getCollectionCount(userId);
       const total = FISH_TABLE.length;
-      const balance = await getCreditBalance(userId);
       const totalCatches = await getTotalCatches(userId);
       const percentage = ((count / total) * 100).toFixed(1);
-      const hookTier = await getHookTier(userId);
-      const equippedName = hookTier > 0 ? HOOK_TIERS[hookTier].name : 'None';
       const caughtSet = await getCaughtFishNames(userId);
 
-      const statsText = `📖 ${displayName}'s collection: **${count}/${total}** (${percentage}%) different fish caught.\n💰 Bits Coins: **${balance}**\n🎣 Total fish caught: **${totalCatches}**\n🪝 Equipped upgrade: **${equippedName}**`;
+      const statsText = `📖 ${displayName}'s collection: **${count}/${total}** (${percentage}%) different fish caught.\n🎣 Total fish caught: **${totalCatches}**`;
 
       // Build up to 4 dropdowns (Discord caps a select menu at 25 options),
       // covering all 97 fish in the same order as FISH_TABLE (rarity order).
@@ -681,6 +709,58 @@ client.on('messageCreate', async (message) => {
     } catch (e) {
       console.error('Error fetching collection:', e);
       message.reply(`⚠️ Couldn't fetch your collection right now, try again later.`);
+    }
+  }
+
+  if (message.content.trim().toLowerCase() === '!inventory') {
+    const userId = message.author.id;
+    const displayName = message.member?.displayName ?? message.author.username;
+
+    try {
+      const balance = await getCreditBalance(userId);
+      const hookTier = await getHookTier(userId);
+      const equippedName = hookTier > 0 ? HOOK_TIERS[hookTier].name : 'None';
+      const ownedTiers = await getOwnedUpgradeTiers(userId);
+      const ownedTrophies = await getOwnedTrophies(userId);
+
+      const statsText = `🎒 ${displayName}'s Inventory\n💰 Bits Coins: **${balance}**\n🪝 Equipped upgrade: **${equippedName}**`;
+
+      const rows = [];
+
+      // "Change equipped upgrade" dropdown — always offers "No upgrade" (base
+      // hook) plus every tier this user has ever purchased.
+      const equipOptions = [
+        { label: 'No upgrade (Base hook)', value: '0', default: hookTier === 0 },
+        ...Array.from(ownedTiers)
+          .sort((a, b) => a - b)
+          .map((tier) => ({
+            label: HOOK_TIERS[tier].name,
+            value: String(tier),
+            default: tier === hookTier,
+          })),
+      ];
+      const equipMenu = new StringSelectMenuBuilder()
+        .setCustomId('inventory_equip_upgrade')
+        .setPlaceholder('Change equipped upgrade...')
+        .addOptions(equipOptions);
+      rows.push(new ActionRowBuilder().addComponents(equipMenu));
+
+      // Trophy list — same "??? until earned" style as the fishdex fish list
+      const trophyOptions = TROPHIES.map((trophy, index) => {
+        const owned = ownedTrophies.has(trophy.key);
+        const label = `${index + 1}: ${owned ? trophy.name : '???'}`.slice(0, 100);
+        return { label, value: trophy.key };
+      });
+      const trophyMenu = new StringSelectMenuBuilder()
+        .setCustomId('inventory_trophy_list')
+        .setPlaceholder(`Trophies (${ownedTrophies.size}/${TROPHIES.length} earned)`)
+        .addOptions(trophyOptions);
+      rows.push(new ActionRowBuilder().addComponents(trophyMenu));
+
+      await message.reply({ content: statsText, components: rows });
+    } catch (e) {
+      console.error('Error fetching inventory:', e);
+      message.reply(`⚠️ Couldn't fetch your inventory right now, try again later.`);
     }
   }
 
@@ -888,6 +968,61 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
+  if (interaction.customId === 'inventory_equip_upgrade') {
+    const userId = interaction.user.id;
+    const displayName = interaction.member?.displayName ?? interaction.user.username;
+    const chosenTier = parseInt(interaction.values[0], 10);
+
+    try {
+      if (chosenTier > 0) {
+        const ownedTiers = await getOwnedUpgradeTiers(userId);
+        if (!ownedTiers.has(chosenTier)) {
+          await interaction.reply({ content: `⚠️ You don't own that upgrade yet — buy it in \`!shop\` first.`, ephemeral: true });
+          return;
+        }
+      }
+
+      await setHookTier(userId, chosenTier);
+      const name = chosenTier > 0 ? HOOK_TIERS[chosenTier].name : 'No upgrade (Base hook)';
+      await interaction.reply({ content: `🪝 ${displayName} equipped **${name}**.`, ephemeral: true });
+    } catch (e) {
+      console.error('Error equipping upgrade:', e);
+      await interaction.reply({ content: `⚠️ Something went wrong, try again later.`, ephemeral: true });
+    }
+    return;
+  }
+
+  if (interaction.customId === 'inventory_trophy_list') {
+    const userId = interaction.user.id;
+    const trophyKey = interaction.values[0];
+    const trophyIndex = TROPHIES.findIndex((t) => t.key === trophyKey);
+    const trophy = TROPHIES[trophyIndex];
+
+    if (!trophy) {
+      await interaction.reply({ content: `⚠️ Invalid trophy selection.`, ephemeral: true });
+      return;
+    }
+
+    try {
+      const ownedTrophies = await getOwnedTrophies(userId);
+      if (!ownedTrophies.has(trophy.key)) {
+        await interaction.reply({
+          content: `❓ You haven't earned trophy **#${trophyIndex + 1}** yet.`,
+          ephemeral: true,
+        });
+        return;
+      }
+      await interaction.reply({
+        content: `🏆 **#${trophyIndex + 1}: ${trophy.name}**\nYou've earned this trophy!`,
+        ephemeral: true,
+      });
+    } catch (e) {
+      console.error('Error fetching trophy detail:', e);
+      await interaction.reply({ content: `⚠️ Something went wrong, try again later.`, ephemeral: true });
+    }
+    return;
+  }
+
   if (interaction.customId === 'shop_trophy') {
     const userId = interaction.user.id;
     const displayName = interaction.member?.displayName ?? interaction.user.username;
@@ -954,11 +1089,10 @@ client.on('interactionCreate', async (interaction) => {
   }
 
   try {
-    const currentTier = await getHookTier(userId);
-    if (chosenTier <= currentTier) {
-      const ownedName = currentTier > 0 ? HOOK_TIERS[currentTier].name : 'no upgrade';
+    const ownedTiers = await getOwnedUpgradeTiers(userId);
+    if (ownedTiers.has(chosenTier)) {
       await interaction.reply({
-        content: `🎣 ${displayName}, you already own **${ownedName}**, which is the same tier or better than **${tierData.name}**. No need to buy it!`,
+        content: `🎣 ${displayName}, you already own **${tierData.name}**! Use \`!inventory\` to equip it if it isn't already.`,
         ephemeral: true,
       });
       return;
@@ -974,10 +1108,11 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     await addCredits(userId, -tierData.cost);
+    await addOwnedUpgradeTier(userId, chosenTier);
     await setHookTier(userId, chosenTier);
 
     await interaction.reply({
-      content: `✅ ${displayName} upgraded to **${tierData.name}**! Your fishing rod now has a **${(tierData.breakChance * 100).toFixed(1)}%** break chance, with a shot at catching multiple fish per cast. (This replaces your previous hook upgrade.)`,
+      content: `✅ ${displayName} purchased and equipped **${tierData.name}**! Your fishing rod now has a **${(tierData.breakChance * 100).toFixed(1)}%** break chance, with a shot at catching multiple fish per cast. You can switch back to any previously owned upgrade anytime via \`!inventory\`.`,
       ephemeral: true,
     });
   } catch (e) {
