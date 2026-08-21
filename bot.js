@@ -46,15 +46,19 @@ async function initDatabase() {
     CREATE TABLE IF NOT EXISTS user_credits (
       user_id TEXT PRIMARY KEY,
       balance INTEGER NOT NULL DEFAULT 0,
-      repair_count INTEGER NOT NULL DEFAULT 0
+      repair_count INTEGER NOT NULL DEFAULT 0,
+      repair_kits INTEGER NOT NULL DEFAULT 0
     )
   `);
+  await pool.query(`ALTER TABLE user_credits ADD COLUMN IF NOT EXISTS repair_kits INTEGER NOT NULL DEFAULT 0`);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS user_upgrades (
       user_id TEXT PRIMARY KEY,
-      hook_tier INTEGER NOT NULL DEFAULT 0
+      hook_tier INTEGER NOT NULL DEFAULT 0,
+      rod_tier INTEGER NOT NULL DEFAULT 0
     )
   `);
+  await pool.query(`ALTER TABLE user_upgrades ADD COLUMN IF NOT EXISTS rod_tier INTEGER NOT NULL DEFAULT 0`);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS user_trophies (
       user_id TEXT NOT NULL,
@@ -173,6 +177,37 @@ async function incrementRepairCount(userId) {
   );
 }
 
+async function getRepairKitCount(userId) {
+  const result = await pool.query(
+    `SELECT repair_kits FROM user_credits WHERE user_id = $1`,
+    [userId]
+  );
+  return result.rows.length > 0 ? result.rows[0].repair_kits : 0;
+}
+
+async function addRepairKit(userId, amount = 1) {
+  const result = await pool.query(
+    `INSERT INTO user_credits (user_id, balance, repair_kits)
+     VALUES ($1, 0, $2)
+     ON CONFLICT (user_id) DO UPDATE SET repair_kits = user_credits.repair_kits + $2
+     RETURNING repair_kits`,
+    [userId, amount]
+  );
+  return result.rows[0].repair_kits;
+}
+
+// Consumes one repair kit if the user has at least one. Returns true if a
+// kit was consumed, false if they had none.
+async function useRepairKit(userId) {
+  const result = await pool.query(
+    `UPDATE user_credits SET repair_kits = repair_kits - 1
+     WHERE user_id = $1 AND repair_kits > 0
+     RETURNING repair_kits`,
+    [userId]
+  );
+  return result.rows.length > 0;
+}
+
 // Records a catch, incrementing times_caught each time (even repeats).
 // Returns true if this is the first time this user caught this specific fish.
 async function recordCatch(userId, fishName) {
@@ -271,6 +306,26 @@ async function addOwnedUpgradeTier(userId, tier) {
   );
 }
 
+// Rod tier — a separate equip slot alongside hooks, structured the same way
+// so future "Rod" items can slot in later. Only tier 0 (base rod) currently
+// exists; there is nothing to purchase yet.
+async function getRodTier(userId) {
+  const result = await pool.query(
+    `SELECT rod_tier FROM user_upgrades WHERE user_id = $1`,
+    [userId]
+  );
+  return result.rows.length > 0 ? result.rows[0].rod_tier : 0;
+}
+
+async function setRodTier(userId, tier) {
+  await pool.query(
+    `INSERT INTO user_upgrades (user_id, rod_tier)
+     VALUES ($1, $2)
+     ON CONFLICT (user_id) DO UPDATE SET rod_tier = $2`,
+    [userId, tier]
+  );
+}
+
 // Hook upgrade tiers, purchasable in the !shop. Index 0 is unused (tier 0 =
 // no upgrade owned, base 4% break chance). chances[i] is the probability of
 // catching the (i+2)th fish, only rolled if the previous one succeeded.
@@ -283,6 +338,11 @@ const HOOK_TIERS = [
   { name: 'Multi-hook I', cost: 75000, breakChance: 0.065, chances: [0.80, 0.60, 0.40, 0.20] },
   { name: 'Multi-hook II', cost: 100000, breakChance: 0.07, chances: [0.90, 0.75, 0.50, 0.35] },
 ];
+
+// Tools, purchasable in the !shop under the "Tools" category. Repair Kits are
+// consumable: buy one for a flat cost (never increases), then use it via
+// !repair to instantly fix a broken rod without waiting on Bits Coins scaling.
+const REPAIR_KIT_COST = 600;
 
 // Trophies, purchasable in the !shop under the "Trophies" category. Each one
 // requires both enough Bits Coins AND meeting a specific in-game requirement
@@ -504,6 +564,7 @@ client.once('ready', async () => {
 const REPAIR_MS = 60 * 60 * 1000; // 1 hour to repair a broken rod passively (if the user does nothing)
 const BREAK_CHANCE = 0.04; // 4% chance to break the rod on each cast
 const NO_CATCH_CHANCE = 0.20; // 20% chance to catch nothing
+const BROKEN_ROD_NO_CATCH_CHANCE = 0.40; // 40% chance to catch nothing while fishing with a broken rod
 const rodBrokenUntil = new Map(); // userId -> timestamp when passive repair finishes
 const currentlyFishing = new Set(); // userId currently fishing
 const currentlyRepairing = new Set(); // userId currently repairing their rod
@@ -561,13 +622,11 @@ client.on('messageCreate', async (message) => {
     // Server display name, falls back to username if unavailable (e.g. DMs)
     const displayName = message.member?.displayName ?? message.author.username;
 
-    // Rod broken?
+    // Rod broken? You can still fish with a broken rod, but with a penalty:
+    // no hook upgrade bonuses apply (base hook only) and the miss chance is
+    // much higher. The rod still auto-repairs after 1 hour either way.
     const repairEnd = rodBrokenUntil.get(userId);
-    if (repairEnd && now < repairEnd) {
-      const minutes = Math.ceil((repairEnd - now) / 60000);
-      message.reply(`🎣💔 ${displayName}'s fishing rod is broken! ${minutes} more minute(s) until it's repaired.`);
-      return;
-    }
+    const isRodBroken = Boolean(repairEnd && now < repairEnd);
 
     // Already fishing?
     if (currentlyFishing.has(userId)) {
@@ -576,34 +635,48 @@ client.on('messageCreate', async (message) => {
     }
 
     // Determine this user's break chance and multi-catch chances based on
-    // their owned hook upgrade tier (0 = no upgrade, base 4% break chance)
-    let hookTier = 0;
-    try {
-      hookTier = await getHookTier(userId);
-    } catch (e) {
-      console.error('Error fetching hook tier:', e);
+    // their owned hook upgrade tier (0 = no upgrade, base 4% break chance).
+    // None of this applies while the rod is already broken.
+    let tierData = null;
+    let breakChance = BREAK_CHANCE;
+    let bonusChances = [];
+    if (!isRodBroken) {
+      let hookTier = 0;
+      try {
+        hookTier = await getHookTier(userId);
+      } catch (e) {
+        console.error('Error fetching hook tier:', e);
+      }
+      tierData = hookTier > 0 ? HOOK_TIERS[hookTier] : null;
+      breakChance = tierData ? tierData.breakChance : BREAK_CHANCE;
+      bonusChances = tierData ? tierData.chances : [];
     }
-    const tierData = hookTier > 0 ? HOOK_TIERS[hookTier] : null;
-    const breakChance = tierData ? tierData.breakChance : BREAK_CHANCE;
-    const bonusChances = tierData ? tierData.chances : [];
 
     currentlyFishing.add(userId);
     const waitMs = Math.floor(Math.random() * (35000 - 15000 + 1)) + 15000;
-    const waitingMessage = await message.reply(`🎣 ${displayName} cast his line into the water...`);
+    const castMessage = isRodBroken
+      ? `🎣💔 ${displayName} awkwardly casts their broken rod into the water...`
+      : `🎣 ${displayName} cast his line into the water...`;
+    const waitingMessage = await message.reply(castMessage);
 
     setTimeout(async () => {
       currentlyFishing.delete(userId);
 
-      // Does the rod break?
-      if (Math.random() < breakChance) {
+      // Does the rod break? (Skipped entirely if it's already broken.)
+      if (!isRodBroken && Math.random() < breakChance) {
         rodBrokenUntil.set(userId, Date.now() + REPAIR_MS);
         try {
-          await waitingMessage.edit(`💥 Snap! ${displayName}'s fishing rod broke! It will take 1 hour to repair.`);
+          await waitingMessage.edit(`💥 Snap! ${displayName}'s fishing rod broke! It will take 1 hour to repair, or use \`!repair\` with a Repair Kit.`);
         } catch (e) {
           console.error('Error editing message:', e);
         }
         return;
       }
+
+      // A broken rod misses much more often, and never benefits from hook
+      // upgrades (single hook, no bonus chain) regardless of what's equipped.
+      const noCatchChance = isRodBroken ? BROKEN_ROD_NO_CATCH_CHANCE : NO_CATCH_CHANCE;
+      const effectiveBonusChances = isRodBroken ? [] : bonusChances;
 
       // Each hook is a separate line in the water. Hooks try one after
       // another as "the first" (using the standard base catch chance) until
@@ -613,7 +686,7 @@ client.on('messageCreate', async (message) => {
       // tier's (smaller) bonus chances, chained in order — each bonus only
       // rolled if the previous one succeeded. If every hook misses its
       // "first fish" attempt, nothing is caught at all.
-      const hookCount = tierData ? tierData.chances.length + 1 : 1;
+      const hookCount = isRodBroken ? 1 : (tierData ? tierData.chances.length + 1 : 1);
       const catchLines = [];
       try {
         let hooksLeft = hookCount;
@@ -625,14 +698,14 @@ client.on('messageCreate', async (message) => {
 
           if (!hasCaughtFirst) {
             // This hook attempts as if it were the very first one
-            if (Math.random() >= NO_CATCH_CHANCE) {
+            if (Math.random() >= noCatchChance) {
               hasCaughtFirst = true;
               catchLines.push(await resolveSingleCatch(userId));
             }
             // otherwise: this hook missed, the next one gets the same shot
           } else {
             // We already have a fish — remaining hooks try for a bonus catch
-            if (bonusIndex < bonusChances.length && Math.random() < bonusChances[bonusIndex]) {
+            if (bonusIndex < effectiveBonusChances.length && Math.random() < effectiveBonusChances[bonusIndex]) {
               catchLines.push(await resolveSingleCatch(userId));
               bonusIndex++;
             } else {
@@ -712,7 +785,7 @@ client.on('messageCreate', async (message) => {
     }
   }
 
-  if (message.content.trim().toLowerCase() === '!inventory') {
+  if (message.content.trim().toLowerCase() === '!inventory' || message.content.trim().toLowerCase() === '!inv') {
     const userId = message.author.id;
     const displayName = message.member?.displayName ?? message.author.username;
 
@@ -722,38 +795,72 @@ client.on('messageCreate', async (message) => {
       const equippedName = hookTier > 0 ? HOOK_TIERS[hookTier].name : 'None';
       const ownedTiers = await getOwnedUpgradeTiers(userId);
       const ownedTrophies = await getOwnedTrophies(userId);
+      const repairKits = await getRepairKitCount(userId);
 
-      const statsText = `🎒 ${displayName}'s Inventory\n💰 Bits Coins: **${balance}**\n🪝 Equipped upgrade: **${equippedName}**`;
+      const statsText = `🎒 ${displayName}'s Inventory\n💰 Bits Coins: **${balance}**\n🪝 Equipped upgrade: **${equippedName}**\n🧰 Repair Kits: **${repairKits}**`;
 
       const rows = [];
 
       // "Change equipped upgrade" dropdown — always offers "No upgrade" (base
-      // hook) plus every tier this user has ever purchased.
+      // hook) plus every tier this user has ever purchased. Descriptions show
+      // the same effect summary as the shop, so there's no need to check
+      // there just to remember what an owned upgrade does.
       const equipOptions = [
-        { label: 'No upgrade (Base hook)', value: '0', default: hookTier === 0 },
+        {
+          label: 'No upgrade (Base hook)',
+          value: '0',
+          description: `Single hook, no bonus fish | Rod break: ${(BREAK_CHANCE * 100).toFixed(1)}%`,
+          default: hookTier === 0,
+        },
         ...Array.from(ownedTiers)
           .sort((a, b) => a - b)
-          .map((tier) => ({
-            label: HOOK_TIERS[tier].name,
-            value: String(tier),
-            default: tier === hookTier,
-          })),
+          .map((tier) => {
+            const t = HOOK_TIERS[tier];
+            const chancesText = t.chances.map((c, i) => `${Math.round(c * 100)}% for fish #${i + 2}`).join(', ');
+            return {
+              label: t.name,
+              value: String(tier),
+              description: `${chancesText} | Rod break: ${(t.breakChance * 100).toFixed(1)}%`.slice(0, 100),
+              default: tier === hookTier,
+            };
+          }),
       ];
       const equipMenu = new StringSelectMenuBuilder()
         .setCustomId('inventory_equip_upgrade')
-        .setPlaceholder('Change equipped upgrade...')
+        .setPlaceholder('🪝 Change equipped upgrade...')
         .addOptions(equipOptions);
       rows.push(new ActionRowBuilder().addComponents(equipMenu));
+
+      // "Change equipped Rod" dropdown — mirrors the hook dropdown structure.
+      // No Rod items exist yet, so this currently only offers the base rod;
+      // future Rod upgrades (sold separately from hooks) will slot in here.
+      const rodTier = await getRodTier(userId);
+      const rodMenu = new StringSelectMenuBuilder()
+        .setCustomId('inventory_equip_rod')
+        .setPlaceholder('🎣 Change equipped Rod...')
+        .addOptions([
+          {
+            label: 'No Rod (Base)',
+            value: '0',
+            description: 'Default fishing rod — no special effects yet.',
+            default: rodTier === 0,
+          },
+        ]);
+      rows.push(new ActionRowBuilder().addComponents(rodMenu));
 
       // Trophy list — same "??? until earned" style as the fishdex fish list
       const trophyOptions = TROPHIES.map((trophy, index) => {
         const owned = ownedTrophies.has(trophy.key);
         const label = `${index + 1}: ${owned ? trophy.name : '???'}`.slice(0, 100);
-        return { label, value: trophy.key };
+        let reqText;
+        if (trophy.type === 'completion') reqText = `Requires ${trophy.value}% Fishdex completion`;
+        else if (trophy.type === 'fish') reqText = trophy.hidden ? `Requires catching a mysterious legendary creature` : `Requires catching: ${trophy.value}`;
+        else reqText = `Requires all 4 unique treasures`;
+        return { label, value: trophy.key, description: reqText.slice(0, 100) };
       });
       const trophyMenu = new StringSelectMenuBuilder()
         .setCustomId('inventory_trophy_list')
-        .setPlaceholder(`Trophies (${ownedTrophies.size}/${TROPHIES.length} earned)`)
+        .setPlaceholder(`🏆 Trophies (${ownedTrophies.size}/${TROPHIES.length} earned)`)
         .addOptions(trophyOptions);
       rows.push(new ActionRowBuilder().addComponents(trophyMenu));
 
@@ -780,31 +887,35 @@ client.on('messageCreate', async (message) => {
       return;
     }
 
-    let repairInfo;
+    let kitCount;
     try {
-      repairInfo = await getRepairInfo(userId);
+      kitCount = await getRepairKitCount(userId);
     } catch (e) {
-      console.error('Error fetching repair info:', e);
-      message.reply(`⚠️ Couldn't check your Bits Coins balance right now, try again later.`);
+      console.error('Error fetching repair kit count:', e);
+      message.reply(`⚠️ Couldn't check your Repair Kits right now, try again later.`);
       return;
     }
 
-    if (repairInfo.balance < repairInfo.repairCost) {
-      message.reply(`💸 ${displayName}, you need **${repairInfo.repairCost}** Bits Coins to repair your rod, but you only have **${repairInfo.balance}**.`);
+    if (kitCount < 1) {
+      message.reply(`🧰 ${displayName}, you need a **Repair Kit** to fix your rod! Buy one in \`!shop\` (Tools category) for **${REPAIR_KIT_COST}** Bits Coins, or wait for it to repair itself in an hour.`);
       return;
     }
 
     currentlyRepairing.add(userId);
     const waitMs = Math.floor(Math.random() * (120000 - 60000 + 1)) + 60000;
-    await message.reply(`🔧 ${displayName} starts repairing their fishing rod...`);
+    await message.reply(`🔧 ${displayName} starts repairing their fishing rod using a Repair Kit...`);
 
     setTimeout(async () => {
       currentlyRepairing.delete(userId);
       try {
-        await addCredits(userId, -repairInfo.repairCost);
-        await incrementRepairCount(userId);
+        const consumed = await useRepairKit(userId);
+        if (!consumed) {
+          await message.channel.send(`⚠️ ${displayName}, you ran out of Repair Kits before the repair finished!`);
+          return;
+        }
         rodBrokenUntil.delete(userId);
-        await message.channel.send(`✅ ${displayName}'s fishing rod is repaired and ready to use! (-${repairInfo.repairCost} Bits Coins)`);
+        const remaining = await getRepairKitCount(userId);
+        await message.channel.send(`✅ ${displayName}'s fishing rod is repaired and ready to use! (Repair Kits left: ${remaining})`);
       } catch (e) {
         console.error('Error completing repair:', e);
         currentlyRepairing.delete(userId);
@@ -913,13 +1024,25 @@ client.on('messageCreate', async (message) => {
       .setPlaceholder('🏆 Trophies — choose a trophy to buy...')
       .addOptions(trophyOptions);
 
+    const toolsMenu = new StringSelectMenuBuilder()
+      .setCustomId('shop_tool')
+      .setPlaceholder('🧰 Tools — choose a tool to buy...')
+      .addOptions([
+        {
+          label: `Repair Kit — ${REPAIR_KIT_COST.toLocaleString('en-US')} Bits Coins`,
+          description: 'Instantly usable via !repair to fix a broken rod. Flat cost, never increases.',
+          value: 'repair_kit',
+        },
+      ]);
+
     const rows = [
       new ActionRowBuilder().addComponents(upgradeMenu),
       new ActionRowBuilder().addComponents(trophyMenu),
+      new ActionRowBuilder().addComponents(toolsMenu),
     ];
 
     await message.reply({
-      content: `🎣 **SHOP**\n🪝 **Upgrades** — hook upgrades let you catch multiple fish at once, at the cost of a higher rod break chance.\n🏆 **Trophies** — cosmetic trophies that require both Bits Coins AND meeting a specific in-game achievement.\nPick one below (only you will see the purchase result):`,
+      content: `🎣 **SHOP**\n🪝 **Upgrades** — hook upgrades let you catch multiple fish at once, at the cost of a higher rod break chance.\n🏆 **Trophies** — cosmetic trophies that require both Bits Coins AND meeting a specific in-game achievement.\n🧰 **Tools** — consumables like Repair Kits, used via \`!repair\`.\nPick one below (only you will see the purchase result):`,
       components: rows,
     });
   }
@@ -987,6 +1110,23 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.reply({ content: `🪝 ${displayName} equipped **${name}**.`, ephemeral: true });
     } catch (e) {
       console.error('Error equipping upgrade:', e);
+      await interaction.reply({ content: `⚠️ Something went wrong, try again later.`, ephemeral: true });
+    }
+    return;
+  }
+
+  if (interaction.customId === 'inventory_equip_rod') {
+    const userId = interaction.user.id;
+    const displayName = interaction.member?.displayName ?? interaction.user.username;
+    const chosenTier = parseInt(interaction.values[0], 10);
+
+    try {
+      // Only tier 0 (base rod) currently exists — this is scaffolding for
+      // future Rod items, sold separately from hooks.
+      await setRodTier(userId, chosenTier);
+      await interaction.reply({ content: `🎣 ${displayName} equipped **No Rod (Base)**.`, ephemeral: true });
+    } catch (e) {
+      console.error('Error equipping rod:', e);
       await interaction.reply({ content: `⚠️ Something went wrong, try again later.`, ephemeral: true });
     }
     return;
@@ -1071,6 +1211,40 @@ client.on('interactionCreate', async (interaction) => {
       });
     } catch (e) {
       console.error('Error processing trophy purchase:', e);
+      await interaction.reply({ content: `⚠️ Something went wrong with your purchase, try again later.`, ephemeral: true });
+    }
+    return;
+  }
+
+  if (interaction.customId === 'shop_tool') {
+    const userId = interaction.user.id;
+    const displayName = interaction.member?.displayName ?? interaction.user.username;
+    const chosenTool = interaction.values[0];
+
+    if (chosenTool !== 'repair_kit') {
+      await interaction.reply({ content: `⚠️ Invalid tool selection.`, ephemeral: true });
+      return;
+    }
+
+    try {
+      const balance = await getCreditBalance(userId);
+      if (balance < REPAIR_KIT_COST) {
+        await interaction.reply({
+          content: `💸 ${displayName}, you need **${REPAIR_KIT_COST}** Bits Coins for a Repair Kit, but you only have **${balance}**.`,
+          ephemeral: true,
+        });
+        return;
+      }
+
+      await addCredits(userId, -REPAIR_KIT_COST);
+      const newCount = await addRepairKit(userId, 1);
+
+      await interaction.reply({
+        content: `🧰 ${displayName} bought a **Repair Kit**! You now have **${newCount}** kit(s). Use \`!repair\` when your rod breaks.`,
+        ephemeral: true,
+      });
+    } catch (e) {
+      console.error('Error processing tool purchase:', e);
       await interaction.reply({ content: `⚠️ Something went wrong with your purchase, try again later.`, ephemeral: true });
     }
     return;
