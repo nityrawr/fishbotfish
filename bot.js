@@ -211,6 +211,19 @@ async function getLevelInfo(userId) {
   return result.rows[0];
 }
 
+// Returns the top N players ranked by prestige first, then level, then XP
+// as a tiebreaker — someone at Level 15 (1) outranks someone at Level 98 (0)
+// since they already hold a prestige rank.
+async function getLeaderboardTop(limit = 10) {
+  const result = await pool.query(
+    `SELECT user_id, level, prestige, xp FROM user_credits
+     ORDER BY prestige DESC, level DESC, xp DESC
+     LIMIT $1`,
+    [limit]
+  );
+  return result.rows;
+}
+
 // Adds XP to a user, handling level-ups and prestige resets. Returns
 // { level, prestige, xp, leveledUp, prestiged } describing the outcome.
 async function addXp(userId, amount) {
@@ -991,6 +1004,52 @@ client.on('messageCreate', async (message) => {
     }
   }
 
+  if (message.content.trim().toLowerCase() === '!leaderboard') {
+    try {
+      const topPlayers = await getLeaderboardTop(10);
+
+      if (topPlayers.length === 0) {
+        message.reply(`📊 No one has fished yet — be the first!`);
+        return;
+      }
+
+      // Resolve each player's display name (server nickname if available)
+      const options = await Promise.all(
+        topPlayers.map(async (player, index) => {
+          let name = 'Unknown angler';
+          try {
+            const member = await message.guild.members.fetch(player.user_id);
+            name = member.displayName;
+          } catch (e) {
+            try {
+              const user = await client.users.fetch(player.user_id);
+              name = user.username;
+            } catch (e2) {
+              // leave default name
+            }
+          }
+          const prestigeTag = player.prestige > 0 ? ` (${player.prestige})` : '';
+          return {
+            label: `#${index + 1} ${name} — Level ${player.level}${prestigeTag}`.slice(0, 100),
+            value: player.user_id,
+          };
+        })
+      );
+
+      const leaderboardMenu = new StringSelectMenuBuilder()
+        .setCustomId('leaderboard_select')
+        .setPlaceholder('🏆 Top 10 anglers — select one for details')
+        .addOptions(options);
+
+      const row = new ActionRowBuilder().addComponents(leaderboardMenu);
+
+      await message.reply({ content: `📊 **LEADERBOARD** — Top 10 anglers by prestige, then level.`, components: [row] });
+    } catch (e) {
+      console.error('Error fetching leaderboard:', e);
+      message.reply(`⚠️ Couldn't fetch the leaderboard right now, try again later.`);
+    }
+  }
+
   if (message.content.trim().toLowerCase() === '!repair') {
     const userId = message.author.id;
     const now = Date.now();
@@ -1206,6 +1265,39 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.reply({ content: detail, ephemeral: true });
     } catch (e) {
       console.error('Error fetching fish detail:', e);
+      await interaction.reply({ content: `⚠️ Something went wrong, try again later.`, ephemeral: true });
+    }
+    return;
+  }
+
+  if (interaction.customId === 'leaderboard_select') {
+    const targetUserId = interaction.values[0];
+
+    try {
+      const { level, prestige, xp } = await getLevelInfo(targetUserId);
+      const xpNeeded = xpForNextLevel(level, prestige);
+      const prestigeTag = prestige > 0 ? ` (${prestige})` : '';
+      const percent = ((xp / xpNeeded) * 100).toFixed(1);
+
+      let name = 'Unknown angler';
+      try {
+        const member = await interaction.guild.members.fetch(targetUserId);
+        name = member.displayName;
+      } catch (e) {
+        try {
+          const user = await client.users.fetch(targetUserId);
+          name = user.username;
+        } catch (e2) {
+          // leave default name
+        }
+      }
+
+      await interaction.reply({
+        content: `⭐ **${name}**\nLevel **${level}${prestigeTag}** — ${xp}/${xpNeeded} XP (${percent}%)`,
+        ephemeral: true,
+      });
+    } catch (e) {
+      console.error('Error fetching leaderboard entry detail:', e);
       await interaction.reply({ content: `⚠️ Something went wrong, try again later.`, ephemeral: true });
     }
     return;
