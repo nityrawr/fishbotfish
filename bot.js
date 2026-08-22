@@ -47,10 +47,16 @@ async function initDatabase() {
       user_id TEXT PRIMARY KEY,
       balance INTEGER NOT NULL DEFAULT 0,
       repair_count INTEGER NOT NULL DEFAULT 0,
-      repair_kits INTEGER NOT NULL DEFAULT 0
+      repair_kits INTEGER NOT NULL DEFAULT 0,
+      level INTEGER NOT NULL DEFAULT 1,
+      prestige INTEGER NOT NULL DEFAULT 0,
+      xp INTEGER NOT NULL DEFAULT 0
     )
   `);
   await pool.query(`ALTER TABLE user_credits ADD COLUMN IF NOT EXISTS repair_kits INTEGER NOT NULL DEFAULT 0`);
+  await pool.query(`ALTER TABLE user_credits ADD COLUMN IF NOT EXISTS level INTEGER NOT NULL DEFAULT 1`);
+  await pool.query(`ALTER TABLE user_credits ADD COLUMN IF NOT EXISTS prestige INTEGER NOT NULL DEFAULT 0`);
+  await pool.query(`ALTER TABLE user_credits ADD COLUMN IF NOT EXISTS xp INTEGER NOT NULL DEFAULT 0`);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS user_upgrades (
       user_id TEXT PRIMARY KEY,
@@ -90,6 +96,20 @@ const CREDIT_VALUES = {
   Epic: 250,
   Legendary: 2500,
 };
+
+// Base XP awarded per rarity (before the ±40% weight-based variance is
+// applied, same variance factor as credits). Unique treasure rarities
+// ("Common Unique", etc.) fall back to their base rarity's value.
+const XP_VALUES = {
+  Common: 50,
+  Rare: 150,
+  Epic: 400,
+  Legendary: 1000,
+};
+
+function baseRarity(rarity) {
+  return rarity.replace(' Unique', '').trim();
+}
 
 // Adds credits to a user's balance (creating the row if needed) and returns
 // the new total balance. Pass a negative amount to deduct.
@@ -153,6 +173,76 @@ async function transferCredits(senderId, receiverId, amount) {
 
 const BASE_REPAIR_COST = 500;
 const REPAIR_COST_INCREASE = 10;
+
+// --- XP / Level / Prestige system ---
+// XP needed per level grows in steps of 10 levels: +200 XP per level within
+// levels 1-10, +400 XP per level within levels 11-20, +800 within 21-30, and
+// so on (the per-level increment doubles every 10 levels). This keeps the
+// climb to level 100 achievable (~27.5M total XP) instead of exploding into
+// astronomical numbers with a flat per-level doubling.
+// At level 100, instead of leveling to 101 the user prestiges: level resets
+// to 1, XP resets to 0, and the entire XP curve is multiplied by 2 per
+// prestige rank (e.g. level 1->2 costs 400 at prestige 0, 800 at prestige 1,
+// 1600 at prestige 2, etc.)
+const MAX_LEVEL = 100;
+
+function decadeIncrement(level) {
+  const decade = Math.floor((level - 1) / 10); // levels 1-10 => decade 0, 11-20 => decade 1, etc.
+  return 200 * Math.pow(2, decade);
+}
+
+// Precomputed base (prestige 0) XP thresholds: BASE_LEVEL_THRESHOLDS[level]
+// is the XP needed to go from `level` to `level + 1`.
+const BASE_LEVEL_THRESHOLDS = [null, 400];
+for (let level = 2; level < MAX_LEVEL; level++) {
+  BASE_LEVEL_THRESHOLDS[level] = BASE_LEVEL_THRESHOLDS[level - 1] + decadeIncrement(level - 1);
+}
+
+function xpForNextLevel(level, prestige) {
+  return Math.round(BASE_LEVEL_THRESHOLDS[level] * Math.pow(2, prestige));
+}
+
+async function getLevelInfo(userId) {
+  const result = await pool.query(
+    `SELECT level, prestige, xp FROM user_credits WHERE user_id = $1`,
+    [userId]
+  );
+  if (result.rows.length === 0) return { level: 1, prestige: 0, xp: 0 };
+  return result.rows[0];
+}
+
+// Adds XP to a user, handling level-ups and prestige resets. Returns
+// { level, prestige, xp, leveledUp, prestiged } describing the outcome.
+async function addXp(userId, amount) {
+  let { level, prestige, xp } = await getLevelInfo(userId);
+  xp += amount;
+  let leveledUp = false;
+  let prestiged = false;
+
+  while (true) {
+    const needed = xpForNextLevel(level, prestige);
+    if (xp < needed) break;
+    xp -= needed;
+    level += 1;
+    leveledUp = true;
+    if (level > MAX_LEVEL) {
+      prestige += 1;
+      level = 1;
+      xp = 0;
+      prestiged = true;
+      break; // XP discarded on prestige, nothing left to carry over
+    }
+  }
+
+  await pool.query(
+    `INSERT INTO user_credits (user_id, balance, level, prestige, xp)
+     VALUES ($1, 0, $2, $3, $4)
+     ON CONFLICT (user_id) DO UPDATE SET level = $2, prestige = $3, xp = $4`,
+    [userId, level, prestige, xp]
+  );
+
+  return { level, prestige, xp, leveledUp, prestiged };
+}
 
 // Returns { balance, repairCost } for a user: current credit balance and
 // the cost of their NEXT repair (increases by 50 after each successful repair).
@@ -353,11 +443,11 @@ const TROPHIES = [
   { key: 'the-captain', name: 'The Captain', cost: 7500, type: 'completion', value: 60 },
   { key: 'legendary-fisherman', name: 'The Legendary Fisherman', cost: 10000, type: 'completion', value: 80 },
   { key: 'neptune', name: 'Neptune, God of the Sea', cost: 25000, type: 'completion', value: 100 },
-  { key: 'martin-brody', name: 'Martin Brody', cost: 25000, type: 'fish', value: 'Megalodon', hidden: true },
-  { key: 'davy-jones', name: 'Davy Jones', cost: 25000, type: 'fish', value: 'Kraken', hidden: true },
-  { key: 'jeremy-wade', name: 'Jeremy Wade', cost: 25000, type: 'fish', value: 'Giant dam catfish', hidden: true },
-  { key: 'monster-hunter', name: 'Monster Hunter', cost: 25000, type: 'fish', value: 'Loch ness monster', hidden: true },
-  { key: 'back-to-the-past', name: 'Back to the Past', cost: 25000, type: 'fish', value: 'Coelacanth', hidden: true },
+  { key: 'martin-brody', name: 'Martin Brody', cost: 25000, type: 'fish', value: 'Megalodon' },
+  { key: 'davy-jones', name: 'Davy Jones', cost: 25000, type: 'fish', value: 'Kraken' },
+  { key: 'jeremy-wade', name: 'Jeremy Wade', cost: 25000, type: 'fish', value: 'Giant dam catfish' },
+  { key: 'monster-hunter', name: 'Monster Hunter', cost: 25000, type: 'fish', value: 'Loch ness monster' },
+  { key: 'back-to-the-past', name: 'Back to the Past', cost: 25000, type: 'fish', value: 'Coelacanth' },
   { key: 'snatcher', name: 'Snatcher', cost: 2500, type: 'fish', value: 'Lost purse' },
   { key: 'money-bag', name: 'Money Bag', cost: 5000, type: 'fish', value: 'Bag of money' },
   { key: 'golden-retriever', name: 'Golden Retriever', cost: 7500, type: 'fish', value: 'Gold bar' },
@@ -386,9 +476,7 @@ async function checkTrophyRequirement(userId, trophy) {
     const met = caughtSet.has(trophy.value);
     return {
       met,
-      reason: trophy.hidden
-        ? `Requires catching a specific, mysterious legendary creature... 🕵️`
-        : `Requires catching **${trophy.value}** first.`,
+      reason: `Requires catching **${trophy.value}** first.`,
     };
   }
   if (trophy.type === 'allUniques') {
@@ -591,11 +679,13 @@ async function resolveSingleCatch(userId) {
   }
   const newTag = isNew ? ' 🆕 **NEW!**' : '';
 
-  // Roll a single ±40% variation factor, applied to both the catch's
-  // weight and the credits earned (a heavier catch pays out more).
+  // Roll a single ±40% variation factor, applied to the catch's weight, the
+  // credits earned, AND the XP earned (a heavier catch pays out more of both).
   const variationFactor = rollVariationFactor();
   const baseCreditAmount = fish.customCredit ?? CREDIT_VALUES[fish.rarity];
   const creditAmount = Math.max(1, Math.round(baseCreditAmount * variationFactor));
+  const baseXpAmount = XP_VALUES[baseRarity(fish.rarity)];
+  const xpAmount = Math.max(1, Math.round(baseXpAmount * variationFactor));
 
   try {
     await addCredits(userId, creditAmount);
@@ -603,14 +693,27 @@ async function resolveSingleCatch(userId) {
     console.error('Error adding credits:', e);
   }
 
+  let levelUpText = '';
+  try {
+    const result = await addXp(userId, xpAmount);
+    if (result.prestiged) {
+      levelUpText = `\n🌟 **PRESTIGE UP!** Now Prestige **${result.prestige}**, Level **1**!`;
+    } else if (result.leveledUp) {
+      const prestigeTag = result.prestige > 0 ? ` (${result.prestige})` : '';
+      levelUpText = `\n⭐ **Level up!** Now Level **${result.level}${prestigeTag}**!`;
+    }
+  } catch (e) {
+    console.error('Error adding XP:', e);
+  }
+
   const weightText = fish.baseWeightGrams
     ? ` (${formatWeight(fish.baseWeightGrams * variationFactor)})`
     : '';
 
   if (fish.rarity.startsWith('Legendary')) {
-    return `🐟✨ **${fish.name}**${weightText} — ${emoji} **${fish.rarity}** catch! Incredible! ✨${newTag} (+${creditAmount} Bits Coins)`;
+    return `🐟✨ **${fish.name}**${weightText} — ${emoji} **${fish.rarity}** catch! Incredible! ✨${newTag} (+${creditAmount} Bits Coins, +${xpAmount} XP)${levelUpText}`;
   }
-  return `🐟 **${fish.name}**${weightText} — ${emoji} ${fish.rarity}${newTag} (+${creditAmount} Bits Coins)`;
+  return `🐟 **${fish.name}**${weightText} — ${emoji} ${fish.rarity}${newTag} (+${creditAmount} Bits Coins, +${xpAmount} XP)${levelUpText}`;
 }
 
 client.on('messageCreate', async (message) => {
@@ -854,7 +957,7 @@ client.on('messageCreate', async (message) => {
         const label = `${index + 1}: ${owned ? trophy.name : '???'}`.slice(0, 100);
         let reqText;
         if (trophy.type === 'completion') reqText = `Requires ${trophy.value}% Fishdex completion`;
-        else if (trophy.type === 'fish') reqText = trophy.hidden ? `Requires catching a mysterious legendary creature` : `Requires catching: ${trophy.value}`;
+        else if (trophy.type === 'fish') reqText = `Requires catching: ${trophy.value}`;
         else reqText = `Requires all 4 unique treasures`;
         return { label, value: trophy.key, description: reqText.slice(0, 100) };
       });
@@ -868,6 +971,23 @@ client.on('messageCreate', async (message) => {
     } catch (e) {
       console.error('Error fetching inventory:', e);
       message.reply(`⚠️ Couldn't fetch your inventory right now, try again later.`);
+    }
+  }
+
+  if (message.content.trim().toLowerCase() === '!rank') {
+    const userId = message.author.id;
+    const displayName = message.member?.displayName ?? message.author.username;
+
+    try {
+      const { level, prestige, xp } = await getLevelInfo(userId);
+      const xpNeeded = xpForNextLevel(level, prestige);
+      const prestigeTag = prestige > 0 ? ` (${prestige})` : '';
+      const percent = ((xp / xpNeeded) * 100).toFixed(1);
+
+      message.reply(`⭐ ${displayName}'s Rank\nLevel **${level}${prestigeTag}** — ${xp}/${xpNeeded} XP (${percent}%)`);
+    } catch (e) {
+      console.error('Error fetching rank:', e);
+      message.reply(`⚠️ Couldn't fetch your rank right now, try again later.`);
     }
   }
 
@@ -1010,7 +1130,7 @@ client.on('messageCreate', async (message) => {
     const trophyOptions = TROPHIES.map((trophy) => {
       let reqText;
       if (trophy.type === 'completion') reqText = `Requires ${trophy.value}% Fishdex completion`;
-      else if (trophy.type === 'fish') reqText = trophy.hidden ? `Requires catching a mysterious legendary creature` : `Requires catching: ${trophy.value}`;
+      else if (trophy.type === 'fish') reqText = `Requires catching: ${trophy.value}`;
       else reqText = `Requires all 4 unique treasures`;
       return {
         label: `${trophy.name} — ${trophy.cost.toLocaleString('en-US')} Bits Coins`,
