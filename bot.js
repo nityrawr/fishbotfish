@@ -12,6 +12,8 @@ const {
   GatewayIntentBits,
   ActionRowBuilder,
   StringSelectMenuBuilder,
+  ButtonBuilder,
+  ButtonStyle,
 } = require('discord.js');
 const { Pool } = require('pg');
 
@@ -87,6 +89,13 @@ async function initDatabase() {
     INSERT INTO user_owned_upgrades (user_id, tier)
     SELECT user_id, hook_tier FROM user_upgrades WHERE hook_tier > 0
     ON CONFLICT DO NOTHING
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_owned_rods (
+      user_id TEXT NOT NULL,
+      tier INTEGER NOT NULL,
+      PRIMARY KEY (user_id, tier)
+    )
   `);
 }
 
@@ -476,6 +485,21 @@ async function setRodTier(userId, tier) {
   );
 }
 
+async function getOwnedRodTiers(userId) {
+  const result = await pool.query(
+    `SELECT tier FROM user_owned_rods WHERE user_id = $1`,
+    [userId]
+  );
+  return new Set(result.rows.map((r) => r.tier));
+}
+
+async function addOwnedRodTier(userId, tier) {
+  await pool.query(
+    `INSERT INTO user_owned_rods (user_id, tier) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+    [userId, tier]
+  );
+}
+
 // Hook upgrade tiers, purchasable in the !shop. Index 0 is unused (tier 0 =
 // no upgrade owned, base 4% break chance). chances[i] is the probability of
 // catching the (i+2)th fish, only rolled if the previous one succeeded.
@@ -487,6 +511,50 @@ const HOOK_TIERS = [
   { name: 'Triple-hook II', cost: 25000, breakChance: 0.06, chances: [0.75, 0.45] },
   { name: 'Multi-hook I', cost: 75000, breakChance: 0.065, chances: [0.80, 0.60, 0.40, 0.20] },
   { name: 'Multi-hook II', cost: 100000, breakChance: 0.07, chances: [0.90, 0.75, 0.50, 0.35] },
+];
+
+// Rod tiers, purchasable in the !shop under the "Rods" category. Each rod
+// has a unique special effect (see EFFECT constants below) and requires
+// owning a specific trophy in addition to the Bits Coins cost. Index 0 is
+// the base rod (no special effect).
+const ROD_TIERS = [
+  null,
+  {
+    name: 'The Titanium Rod',
+    cost: 20000,
+    requiredTrophy: 'the-captain',
+    effect: 'no_break',
+    description: 'Your line can never break.',
+  },
+  {
+    name: 'The Octo-Rod',
+    cost: 200000,
+    requiredTrophy: 'davy-jones',
+    effect: 'octo',
+    chances: [0.90, 0.82, 0.75, 0.70, 0.45, 0.35, 0.27],
+    description: "8 fishing lines at once — hook upgrades don't apply while equipped.",
+  },
+  {
+    name: 'The Money Printer',
+    cost: 25000,
+    requiredTrophy: 'pirate-seven-seas',
+    effect: 'double_credits',
+    description: 'x2 Bits Coins on every fish reeled in.',
+  },
+  {
+    name: 'The DMC-12 Rod',
+    cost: 10000,
+    requiredTrophy: 'back-to-the-past',
+    effect: 'replay',
+    description: 'Relive your last catch for x3 Bits Coins & XP (20 min cooldown).',
+  },
+  {
+    name: 'The Fastasfluff Rod',
+    cost: 50000,
+    requiredTrophy: 'legendary-fisherman',
+    effect: 'fast_fishing',
+    description: '1.5x faster fishing — shorter wait on every cast.',
+  },
 ];
 
 // Tools, purchasable in the !shop under the "Tools" category. Repair Kits are
@@ -743,7 +811,7 @@ const BREAK_MESSAGES = [
 
 // Resolves a single fish catch: picks a fish, applies weight/credit variation,
 // records it and awards credits. Returns a formatted line of text for this catch.
-async function resolveSingleCatch(userId) {
+async function resolveSingleCatch(userId, creditMultiplier = 1) {
   const fish = pickFish();
   const emoji = RARITY_EMOJI[fish.rarity];
 
@@ -759,7 +827,7 @@ async function resolveSingleCatch(userId) {
   // credits earned, AND the XP earned (a heavier catch pays out more of both).
   const variationFactor = rollVariationFactor();
   const baseCreditAmount = fish.customCredit ?? CREDIT_VALUES[fish.rarity];
-  const creditAmount = Math.max(1, Math.round(baseCreditAmount * variationFactor));
+  const creditAmount = Math.max(1, Math.round(baseCreditAmount * variationFactor * creditMultiplier));
   const baseXpAmount = XP_VALUES[baseRarity(fish.rarity)];
   const xpAmount = Math.max(1, Math.round(baseXpAmount * variationFactor));
 
@@ -786,11 +854,23 @@ async function resolveSingleCatch(userId) {
     ? ` (${formatWeight(fish.baseWeightGrams * variationFactor)})`
     : '';
 
+  let text;
   if (fish.rarity.startsWith('Legendary')) {
-    return `🐟✨ **${fish.name}**${weightText} — ${emoji} **${fish.rarity}** catch! Incredible! ✨${newTag} (+${creditAmount} Bits Coins, +${xpAmount} XP)${levelUpText}`;
+    text = `🐟✨ **${fish.name}**${weightText} — ${emoji} **${fish.rarity}** catch! Incredible! ✨${newTag} (+${creditAmount} Bits Coins, +${xpAmount} XP)${levelUpText}`;
+  } else {
+    text = `🐟 **${fish.name}**${weightText} — ${emoji} ${fish.rarity}${newTag} (+${creditAmount} Bits Coins, +${xpAmount} XP)${levelUpText}`;
   }
-  return `🐟 **${fish.name}**${weightText} — ${emoji} ${fish.rarity}${newTag} (+${creditAmount} Bits Coins, +${xpAmount} XP)${levelUpText}`;
+
+  return { text, creditAmount, xpAmount };
 }
+
+// Per-user in-memory state for The DMC-12 Rod's replay ability: the totals
+// of their most recent successful !fish, and when they can next use it.
+const lastCatchTotals = new Map(); // userId -> { credits, xp }
+const dmc12CooldownUntil = new Map(); // userId -> timestamp
+const DMC12_COOLDOWN_MS = 20 * 60 * 1000;
+
+
 
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
@@ -813,26 +893,47 @@ client.on('messageCreate', async (message) => {
       return;
     }
 
-    // Determine this user's break chance and multi-catch chances based on
-    // their owned hook upgrade tier (0 = no upgrade, base 4% break chance).
-    // None of this applies while the rod is already broken.
+    // Determine this user's equipped Rod (special item effect) and hook
+    // upgrade (multi-catch chances), used together to figure out break
+    // chance, catch chances, credit multiplier, and fishing speed.
+    let rodTierData = null;
     let tierData = null;
     let breakChance = BREAK_CHANCE;
     let bonusChances = [];
+    let creditMultiplier = 1;
+    let speedMultiplier = 1;
+
     if (!isRodBroken) {
+      let rodTier = 0;
       let hookTier = 0;
       try {
+        rodTier = await getRodTier(userId);
         hookTier = await getHookTier(userId);
       } catch (e) {
-        console.error('Error fetching hook tier:', e);
+        console.error('Error fetching equipped rod/hook:', e);
       }
+      rodTierData = rodTier > 0 ? ROD_TIERS[rodTier] : null;
       tierData = hookTier > 0 ? HOOK_TIERS[hookTier] : null;
       breakChance = tierData ? tierData.breakChance : BREAK_CHANCE;
       bonusChances = tierData ? tierData.chances : [];
+
+      if (rodTierData) {
+        if (rodTierData.effect === 'no_break') {
+          breakChance = 0;
+        } else if (rodTierData.effect === 'octo') {
+          // The Octo-Rod overrides hook upgrades entirely with its own
+          // 8-line chain of catch chances.
+          bonusChances = rodTierData.chances;
+        } else if (rodTierData.effect === 'double_credits') {
+          creditMultiplier = 2;
+        } else if (rodTierData.effect === 'fast_fishing') {
+          speedMultiplier = 1.5;
+        }
+      }
     }
 
     currentlyFishing.add(userId);
-    const waitMs = Math.floor(Math.random() * (35000 - 15000 + 1)) + 15000;
+    const waitMs = Math.floor((Math.floor(Math.random() * (35000 - 15000 + 1)) + 15000) / speedMultiplier);
     const castMessage = isRodBroken
       ? `🎣💔 ${displayName} awkwardly casts their broken rod into the water...`
       : `🎣 ${displayName} cast his line into the water...`;
@@ -841,7 +942,8 @@ client.on('messageCreate', async (message) => {
     setTimeout(async () => {
       currentlyFishing.delete(userId);
 
-      // Does the rod break? (Skipped entirely if it's already broken.)
+      // Does the rod break? (Skipped entirely if it's already broken, or if
+      // The Titanium Rod is equipped — breakChance is forced to 0 above.)
       if (!isRodBroken && Math.random() < breakChance) {
         rodBrokenUntil.set(userId, Date.now() + REPAIR_MS);
         try {
@@ -861,6 +963,7 @@ client.on('messageCreate', async (message) => {
       // upgrades (single hook, no bonus chain) regardless of what's equipped.
       const noCatchChance = isRodBroken ? BROKEN_ROD_NO_CATCH_CHANCE : NO_CATCH_CHANCE;
       const effectiveBonusChances = isRodBroken ? [] : bonusChances;
+      const effectiveCreditMultiplier = isRodBroken ? 1 : creditMultiplier;
 
       // Each hook is a separate line in the water. Hooks try one after
       // another as "the first" (using the standard base catch chance) until
@@ -870,8 +973,10 @@ client.on('messageCreate', async (message) => {
       // tier's (smaller) bonus chances, chained in order — each bonus only
       // rolled if the previous one succeeded. If every hook misses its
       // "first fish" attempt, nothing is caught at all.
-      const hookCount = isRodBroken ? 1 : (tierData ? tierData.chances.length + 1 : 1);
+      const hookCount = isRodBroken ? 1 : effectiveBonusChances.length + 1;
       const catchLines = [];
+      let totalCredits = 0;
+      let totalXp = 0;
       try {
         let hooksLeft = hookCount;
         let hasCaughtFirst = false;
@@ -884,13 +989,19 @@ client.on('messageCreate', async (message) => {
             // This hook attempts as if it were the very first one
             if (Math.random() >= noCatchChance) {
               hasCaughtFirst = true;
-              catchLines.push(await resolveSingleCatch(userId));
+              const result = await resolveSingleCatch(userId, effectiveCreditMultiplier);
+              catchLines.push(result.text);
+              totalCredits += result.creditAmount;
+              totalXp += result.xpAmount;
             }
             // otherwise: this hook missed, the next one gets the same shot
           } else {
             // We already have a fish — remaining hooks try for a bonus catch
             if (bonusIndex < effectiveBonusChances.length && Math.random() < effectiveBonusChances[bonusIndex]) {
-              catchLines.push(await resolveSingleCatch(userId));
+              const result = await resolveSingleCatch(userId, effectiveCreditMultiplier);
+              catchLines.push(result.text);
+              totalCredits += result.creditAmount;
+              totalXp += result.xpAmount;
               bonusIndex++;
             } else {
               break; // bonus chain stops on the first failed roll
@@ -910,6 +1021,9 @@ client.on('messageCreate', async (message) => {
         return;
       }
 
+      // Remember this catch's totals for The DMC-12 Rod's replay ability
+      lastCatchTotals.set(userId, { credits: totalCredits, xp: totalXp });
+
       const header =
         catchLines.length > 1
           ? `🎏 ${displayName} reeled in **${catchLines.length} fish** at once!\n`
@@ -917,7 +1031,16 @@ client.on('messageCreate', async (message) => {
       const text = header + catchLines.join('\n');
 
       try {
-        await message.reply(text);
+        const components = [];
+        if (rodTierData && rodTierData.effect === 'replay') {
+          const replayButton = new ButtonBuilder()
+            .setCustomId('dmc12_replay')
+            .setEmoji('⏰')
+            .setLabel('Relive this catch (x3)')
+            .setStyle(ButtonStyle.Primary);
+          components.push(new ActionRowBuilder().addComponents(replayButton));
+        }
+        await message.reply({ content: text, components });
       } catch (e) {
         console.error('Error sending message:', e);
       }
@@ -1015,21 +1138,33 @@ client.on('messageCreate', async (message) => {
         .addOptions(equipOptions);
       rows.push(new ActionRowBuilder().addComponents(equipMenu));
 
-      // "Change equipped Rod" dropdown — mirrors the hook dropdown structure.
-      // No Rod items exist yet, so this currently only offers the base rod;
-      // future Rod upgrades (sold separately from hooks) will slot in here.
+      // "Change equipped Rod" dropdown — mirrors the hook dropdown structure:
+      // "No Rod" plus every rod this user has ever purchased.
       const rodTier = await getRodTier(userId);
+      const ownedRods = await getOwnedRodTiers(userId);
+      const rodOptions = [
+        {
+          label: 'No Rod (Base)',
+          value: '0',
+          description: 'Default fishing rod — no special effects.',
+          default: rodTier === 0,
+        },
+        ...Array.from(ownedRods)
+          .sort((a, b) => a - b)
+          .map((tier) => {
+            const r = ROD_TIERS[tier];
+            return {
+              label: r.name,
+              value: String(tier),
+              description: r.description.slice(0, 100),
+              default: tier === rodTier,
+            };
+          }),
+      ];
       const rodMenu = new StringSelectMenuBuilder()
         .setCustomId('inventory_equip_rod')
         .setPlaceholder('🎣 Change equipped Rod...')
-        .addOptions([
-          {
-            label: 'No Rod (Base)',
-            value: '0',
-            description: 'Default fishing rod — no special effects yet.',
-            default: rodTier === 0,
-          },
-        ]);
+        .addOptions(rodOptions);
       rows.push(new ActionRowBuilder().addComponents(rodMenu));
 
       // Trophy list — same "??? until earned" style as the fishdex fish list
@@ -1199,6 +1334,17 @@ client.on('messageCreate', async (message) => {
       return;
     }
 
+    try {
+      const rodTier = await getRodTier(userId);
+      const equippedRod = rodTier > 0 ? ROD_TIERS[rodTier] : null;
+      if (equippedRod && equippedRod.effect === 'no_break') {
+        message.reply(`🎣 ${displayName}, The Titanium Rod is indestructible — you can't break it, even on purpose!`);
+        return;
+      }
+    } catch (e) {
+      console.error('Error checking equipped rod:', e);
+    }
+
     rodBrokenUntil.set(userId, now + REPAIR_MS);
     try {
       await incrementBrokenCount(userId);
@@ -1300,14 +1446,30 @@ client.on('messageCreate', async (message) => {
         },
       ]);
 
+    const rodOptions = ROD_TIERS.slice(1).map((rod, index) => {
+      const tierNumber = index + 1;
+      const requiredTrophyName = TROPHIES.find((t) => t.key === rod.requiredTrophy)?.name ?? rod.requiredTrophy;
+      return {
+        label: `${rod.name} — ${rod.cost.toLocaleString('en-US')} Bits Coins`,
+        description: `${rod.description} Requires: ${requiredTrophyName} trophy.`.slice(0, 100),
+        value: String(tierNumber),
+      };
+    });
+
+    const rodMenu = new StringSelectMenuBuilder()
+      .setCustomId('shop_rod')
+      .setPlaceholder('🎣 Rods — choose a rod to buy...')
+      .addOptions(rodOptions);
+
     const rows = [
       new ActionRowBuilder().addComponents(upgradeMenu),
       new ActionRowBuilder().addComponents(trophyMenu),
       new ActionRowBuilder().addComponents(toolsMenu),
+      new ActionRowBuilder().addComponents(rodMenu),
     ];
 
     await message.reply({
-      content: `🎣 **SHOP**\n🪝 **Upgrades** — hook upgrades let you catch multiple fish at once, at the cost of a higher rod break chance.\n🏆 **Trophies** — cosmetic trophies that require both Bits Coins AND meeting a specific in-game achievement.\n🧰 **Tools** — consumables like Repair Kits, used via \`!repair\`.\nPick one below (only you will see the purchase result):`,
+      content: `🎣 **SHOP**\n🪝 **Upgrades** — hook upgrades let you catch multiple fish at once, at the cost of a higher rod break chance.\n🏆 **Trophies** — cosmetic trophies that require both Bits Coins AND meeting a specific in-game achievement.\n🧰 **Tools** — consumables like Repair Kits, used via \`!repair\`.\n🎣 **Rods** — powerful rods with unique effects, each requiring a specific trophy to unlock.\nPick one below (only you will see the purchase result):`,
       components: rows,
     });
   }
@@ -1317,6 +1479,71 @@ client.on('messageCreate', async (message) => {
 // Replies here are ephemeral, so results are only visible to the person who
 // interacted — the original message (shop or fishdex) stays as-is.
 client.on('interactionCreate', async (interaction) => {
+  if (interaction.isButton() && interaction.customId === 'dmc12_replay') {
+    const userId = interaction.user.id;
+    const displayName = interaction.member?.displayName ?? interaction.user.username;
+    const now = Date.now();
+
+    const cooldownEnd = dmc12CooldownUntil.get(userId);
+    if (cooldownEnd && now < cooldownEnd) {
+      const minutes = Math.ceil((cooldownEnd - now) / 60000);
+      await interaction.reply({
+        content: `⏰ ${displayName}, The DMC-12 Rod needs **${minutes} more minute(s)** to recharge.`,
+        ephemeral: true,
+      });
+      return;
+    }
+
+    const last = lastCatchTotals.get(userId);
+    if (!last) {
+      await interaction.reply({ content: `⏰ ${displayName}, you don't have a recent catch to relive yet!`, ephemeral: true });
+      return;
+    }
+
+    // Verify the Rod is still equipped — otherwise a stale button from an
+    // earlier message shouldn't still work after switching rods.
+    let rodTier = 0;
+    try {
+      rodTier = await getRodTier(userId);
+    } catch (e) {
+      console.error('Error fetching rod tier for replay:', e);
+    }
+    const equippedRod = rodTier > 0 ? ROD_TIERS[rodTier] : null;
+    if (!equippedRod || equippedRod.effect !== 'replay') {
+      await interaction.reply({ content: `⏰ ${displayName}, you need The DMC-12 Rod equipped to use this!`, ephemeral: true });
+      return;
+    }
+
+    const bonusCredits = last.credits * 3;
+    const bonusXp = last.xp * 3;
+
+    try {
+      await addCredits(userId, bonusCredits);
+    } catch (e) {
+      console.error('Error adding replay credits:', e);
+    }
+
+    let levelUpText = '';
+    try {
+      const result = await addXp(userId, bonusXp);
+      if (result.prestiged) {
+        levelUpText = `\n🌟 **PRESTIGE UP!** Now Prestige **${result.prestige}**, Level **1**!`;
+      } else if (result.leveledUp) {
+        const prestigeTag = result.prestige > 0 ? ` (${result.prestige})` : '';
+        levelUpText = `\n⭐ **Level up!** Now Level **${result.level}${prestigeTag}**!`;
+      }
+    } catch (e) {
+      console.error('Error adding replay XP:', e);
+    }
+
+    dmc12CooldownUntil.set(userId, now + DMC12_COOLDOWN_MS);
+
+    await interaction.reply(
+      `⏰✨ ${displayName} rewinds time with The DMC-12 Rod and relives their last catch — **x3 rewards**! (+${bonusCredits} Bits Coins, +${bonusXp} XP)${levelUpText}`
+    );
+    return;
+  }
+
   if (!interaction.isStringSelectMenu()) return;
 
   if (interaction.customId.startsWith('fishdex_page_')) {
@@ -1430,10 +1657,17 @@ client.on('interactionCreate', async (interaction) => {
     const chosenTier = parseInt(interaction.values[0], 10);
 
     try {
-      // Only tier 0 (base rod) currently exists — this is scaffolding for
-      // future Rod items, sold separately from hooks.
+      if (chosenTier > 0) {
+        const ownedRods = await getOwnedRodTiers(userId);
+        if (!ownedRods.has(chosenTier)) {
+          await interaction.reply({ content: `⚠️ You don't own that rod yet — buy it in \`!shop\` first.`, ephemeral: true });
+          return;
+        }
+      }
+
       await setRodTier(userId, chosenTier);
-      await interaction.reply({ content: `🎣 ${displayName} equipped **No Rod (Base)**.`, ephemeral: true });
+      const name = chosenTier > 0 ? ROD_TIERS[chosenTier].name : 'No Rod (Base)';
+      await interaction.reply({ content: `🎣 ${displayName} equipped **${name}**.`, ephemeral: true });
     } catch (e) {
       console.error('Error equipping rod:', e);
       await interaction.reply({ content: `⚠️ Something went wrong, try again later.`, ephemeral: true });
@@ -1554,6 +1788,61 @@ client.on('interactionCreate', async (interaction) => {
       });
     } catch (e) {
       console.error('Error processing tool purchase:', e);
+      await interaction.reply({ content: `⚠️ Something went wrong with your purchase, try again later.`, ephemeral: true });
+    }
+    return;
+  }
+
+  if (interaction.customId === 'shop_rod') {
+    const userId = interaction.user.id;
+    const displayName = interaction.member?.displayName ?? interaction.user.username;
+    const chosenTier = parseInt(interaction.values[0], 10);
+    const rodData = ROD_TIERS[chosenTier];
+
+    if (!rodData) {
+      await interaction.reply({ content: `⚠️ Invalid rod selection.`, ephemeral: true });
+      return;
+    }
+
+    try {
+      const ownedRods = await getOwnedRodTiers(userId);
+      if (ownedRods.has(chosenTier)) {
+        await interaction.reply({
+          content: `🎣 ${displayName}, you already own **${rodData.name}**! Use \`!inventory\` to equip it if it isn't already.`,
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const ownedTrophies = await getOwnedTrophies(userId);
+      if (!ownedTrophies.has(rodData.requiredTrophy)) {
+        const requiredTrophyName = TROPHIES.find((t) => t.key === rodData.requiredTrophy)?.name ?? rodData.requiredTrophy;
+        await interaction.reply({
+          content: `🔒 ${displayName}, you need the **${requiredTrophyName}** trophy before you can buy **${rodData.name}**.`,
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const balance = await getCreditBalance(userId);
+      if (balance < rodData.cost) {
+        await interaction.reply({
+          content: `💸 ${displayName}, you need **${rodData.cost.toLocaleString('en-US')}** Bits Coins for **${rodData.name}**, but you only have **${balance}**.`,
+          ephemeral: true,
+        });
+        return;
+      }
+
+      await addCredits(userId, -rodData.cost);
+      await addOwnedRodTier(userId, chosenTier);
+      await setRodTier(userId, chosenTier);
+
+      await interaction.reply({
+        content: `✅ ${displayName} purchased and equipped **${rodData.name}**! ${rodData.description} You can switch back to any previously owned rod anytime via \`!inventory\`.`,
+        ephemeral: true,
+      });
+    } catch (e) {
+      console.error('Error processing rod purchase:', e);
       await interaction.reply({ content: `⚠️ Something went wrong with your purchase, try again later.`, ephemeral: true });
     }
     return;
