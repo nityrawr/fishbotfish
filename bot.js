@@ -225,6 +225,30 @@ async function getLeaderboardTop(limit = 10) {
   return result.rows;
 }
 
+// Returns { rank, total } for a user: their position in the leaderboard
+// (same ordering as getLeaderboardTop) and the total number of players who
+// have ever earned Bits Coins or XP (i.e. have fished at least once).
+// Returns null if the user has no economy record yet (never fished).
+async function getRankPosition(userId) {
+  const existsResult = await pool.query(
+    `SELECT prestige, level, xp FROM user_credits WHERE user_id = $1`,
+    [userId]
+  );
+  if (existsResult.rows.length === 0) return null;
+  const { prestige, level, xp } = existsResult.rows[0];
+
+  const betterResult = await pool.query(
+    `SELECT COUNT(*)::int AS better_count FROM user_credits WHERE (prestige, level, xp) > ($1, $2, $3)`,
+    [prestige, level, xp]
+  );
+  const totalResult = await pool.query(`SELECT COUNT(*)::int AS total FROM user_credits`);
+
+  return {
+    rank: betterResult.rows[0].better_count + 1,
+    total: totalResult.rows[0].total,
+  };
+}
+
 // Returns the top N players with the most broken rods (accidental breaks
 // while fishing, plus voluntary !break uses).
 async function getUnluckiestTop(limit = 10) {
@@ -1040,8 +1064,10 @@ client.on('messageCreate', async (message) => {
       const xpNeeded = xpForNextLevel(level, prestige);
       const prestigeTag = prestige > 0 ? ` (${prestige})` : '';
       const percent = ((xp / xpNeeded) * 100).toFixed(1);
+      const position = await getRankPosition(userId);
+      const rankLine = position ? `${displayName}'s rank: **${position.rank} / ${position.total}**\n` : '';
 
-      message.reply(`⭐ ${displayName}'s Rank\nLevel **${level}${prestigeTag}** — ${xp}/${xpNeeded} XP (${percent}%)`);
+      message.reply(`⭐ ${rankLine}Level **${level}${prestigeTag}** — ${xp}/${xpNeeded} XP (${percent}%)`);
     } catch (e) {
       console.error('Error fetching rank:', e);
       message.reply(`⚠️ Couldn't fetch your rank right now, try again later.`);
