@@ -586,6 +586,9 @@ const TROPHIES = [
     type: 'allUniques',
     value: ['Lost purse', 'Bag of money', 'Gold bar', 'Long thought forgotten treasure'],
   },
+  { key: 'hookman', name: 'Hookman', cost: 10000, type: 'allHooks' },
+  { key: 'rodman', name: 'Rodman', cost: 10000, type: 'allRods' },
+  { key: 'ascended', name: 'Ascended', cost: 250000, type: 'ascended' },
 ];
 
 // Checks whether a user currently meets a trophy's in-game requirement
@@ -613,6 +616,36 @@ async function checkTrophyRequirement(userId, trophy) {
     return {
       met: missing.length === 0,
       reason: missing.length > 0 ? `Still missing: ${missing.join(', ')}.` : '',
+    };
+  }
+  if (trophy.type === 'allHooks') {
+    const owned = await getOwnedUpgradeTiers(userId);
+    const totalHooks = HOOK_TIERS.length - 1; // index 0 is null (base, not purchasable)
+    return {
+      met: owned.size >= totalHooks,
+      reason: `Requires owning all **${totalHooks}** hook upgrades (you own **${owned.size}**).`,
+    };
+  }
+  if (trophy.type === 'allRods') {
+    const owned = await getOwnedRodTiers(userId);
+    const totalRods = ROD_TIERS.length - 1; // index 0 is null (base, not purchasable)
+    return {
+      met: owned.size >= totalRods,
+      reason: `Requires owning all **${totalRods}** rods (you own **${owned.size}**).`,
+    };
+  }
+  if (trophy.type === 'ascended') {
+    const count = await getCollectionCount(userId);
+    const allFishCaught = count >= FISH_TABLE.length;
+    const ownedTrophies = await getOwnedTrophies(userId);
+    const otherTrophiesCount = TROPHIES.length - 1; // every trophy except Ascended itself
+    const allOtherTrophiesOwned = ownedTrophies.size >= otherTrophiesCount;
+    const missingParts = [];
+    if (!allFishCaught) missingParts.push(`${FISH_TABLE.length - count} fish still uncaught`);
+    if (!allOtherTrophiesOwned) missingParts.push(`${otherTrophiesCount - ownedTrophies.size} other trophy/trophies still unbought`);
+    return {
+      met: allFishCaught && allOtherTrophiesOwned,
+      reason: missingParts.length > 0 ? `Still missing: ${missingParts.join(', ')}.` : '',
     };
   }
   return { met: false, reason: 'Unknown requirement.' };
@@ -1058,7 +1091,8 @@ client.on('messageCreate', async (message) => {
       const percentage = ((count / total) * 100).toFixed(1);
       const caughtSet = await getCaughtFishNames(userId);
 
-      const statsText = `📖 ${displayName}'s collection: **${count}/${total}** (${percentage}%) different fish caught.\n🎣 Total fish caught: **${totalCatches}**`;
+      const completionLine = count >= total ? `\n🌊 *${displayName} has the soul of a true fisherman.*` : '';
+      const statsText = `📖 ${displayName}'s collection: **${count}/${total}** (${percentage}%) different fish caught.\n🎣 Total fish caught: **${totalCatches}**${completionLine}`;
 
       // Build up to 4 dropdowns (Discord caps a select menu at 25 options),
       // covering all 97 fish in the same order as FISH_TABLE (rarity order).
@@ -1174,7 +1208,10 @@ client.on('messageCreate', async (message) => {
         let reqText;
         if (trophy.type === 'completion') reqText = `Requires ${trophy.value}% Fishdex completion`;
         else if (trophy.type === 'fish') reqText = `Requires catching: ${trophy.value}`;
-        else reqText = `Requires all 4 unique treasures`;
+        else if (trophy.type === 'allUniques') reqText = `Requires all 4 unique treasures`;
+        else if (trophy.type === 'allHooks') reqText = `Requires owning all hook upgrades`;
+        else if (trophy.type === 'allRods') reqText = `Requires owning all rods`;
+        else reqText = `Requires catching every fish + all other trophies`;
         return { label, value: trophy.key, description: reqText.slice(0, 100) };
       });
       const trophyMenu = new StringSelectMenuBuilder()
@@ -1422,7 +1459,10 @@ client.on('messageCreate', async (message) => {
       let reqText;
       if (trophy.type === 'completion') reqText = `Requires ${trophy.value}% Fishdex completion`;
       else if (trophy.type === 'fish') reqText = `Requires catching: ${trophy.value}`;
-      else reqText = `Requires all 4 unique treasures`;
+      else if (trophy.type === 'allUniques') reqText = `Requires all 4 unique treasures`;
+      else if (trophy.type === 'allHooks') reqText = `Requires owning all hook upgrades`;
+      else if (trophy.type === 'allRods') reqText = `Requires owning all rods`;
+      else reqText = `Requires catching every fish + all other trophies`;
       return {
         label: `${trophy.name} — ${trophy.cost.toLocaleString('en-US')} Bits Coins`,
         description: reqText.slice(0, 100),
