@@ -901,7 +901,7 @@ async function resolveSingleCatch(userId, creditMultiplier = 1) {
 // of their most recent successful !fish, and when they can next use it.
 const lastCatchTotals = new Map(); // userId -> { credits, xp }
 const dmc12CooldownUntil = new Map(); // userId -> timestamp
-const DMC12_COOLDOWN_MS = 20 * 60 * 1000;
+const DMC12_COOLDOWN_MS = 8 * 60 * 1000;
 
 
 
@@ -1066,12 +1066,16 @@ client.on('messageCreate', async (message) => {
       try {
         const components = [];
         if (rodTierData && rodTierData.effect === 'replay') {
-          const replayButton = new ButtonBuilder()
-            .setCustomId('dmc12_replay')
-            .setEmoji('⏰')
-            .setLabel('Relive this catch (x3)')
-            .setStyle(ButtonStyle.Primary);
-          components.push(new ActionRowBuilder().addComponents(replayButton));
+          const cooldownEnd = dmc12CooldownUntil.get(userId);
+          const isOnCooldown = Boolean(cooldownEnd && Date.now() < cooldownEnd);
+          if (!isOnCooldown) {
+            const replayButton = new ButtonBuilder()
+              .setCustomId('dmc12_replay')
+              .setEmoji('⏰')
+              .setLabel('Relive this catch (x3)')
+              .setStyle(ButtonStyle.Primary);
+            components.push(new ActionRowBuilder().addComponents(replayButton));
+          }
         }
         await message.reply({ content: text, components });
       } catch (e) {
@@ -1554,6 +1558,11 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
+    // Lock immediately (before any await) so a near-simultaneous second
+    // click can't sneak past the checks above and double-spend this catch.
+    dmc12CooldownUntil.set(userId, now + DMC12_COOLDOWN_MS);
+    lastCatchTotals.delete(userId);
+
     const bonusCredits = last.credits * 3;
     const bonusXp = last.xp * 3;
 
@@ -1575,8 +1584,6 @@ client.on('interactionCreate', async (interaction) => {
     } catch (e) {
       console.error('Error adding replay XP:', e);
     }
-
-    dmc12CooldownUntil.set(userId, now + DMC12_COOLDOWN_MS);
 
     await interaction.reply(
       `⏰✨ ${displayName} rewinds time with The DMC-12 Rod and relives their last catch — **x3 rewards**! (+${bonusCredits} Bits Coins, +${bonusXp} XP)${levelUpText}`
